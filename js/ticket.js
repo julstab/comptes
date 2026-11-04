@@ -102,22 +102,62 @@ function parse(response) {
   }
 }
 
-// Lit un ticket et renvoie les champs du schéma. context : { today, titles, categories, modes } (listes de textes).
-export async function readTicket(file, context) {
+// Envoie une image et une consigne à Gemini, renvoie l'objet JSON décrit par le schéma.
+async function ask(file, text, schema, maxSide) {
   const key = getKey();
   if (!key) throw new Error('Ajoutez votre clé Gemini dans les Réglages.');
-  const image = await shrink(file);
+  const image = await shrink(file, maxSide);
   const contents = [{
     role: 'user',
-    parts: [{ inlineData: { mimeType: image.type || 'image/jpeg', data: await toBase64(image) } }, { text: prompt(context) }],
+    parts: [{ inlineData: { mimeType: image.type || 'image/jpeg', data: await toBase64(image) } }, { text }],
   }];
   let response;
   try {
-    response = await call({ contents, generationConfig: { responseMimeType: 'application/json', responseJsonSchema: SCHEMA } }, key);
+    response = await call({ contents, generationConfig: { responseMimeType: 'application/json', responseJsonSchema: schema } }, key);
   } catch (err) {
-    // Schéma refusé par cette version de l'API : on redemande du JSON simple, le prompt décrit déjà les champs.
+    // Schéma refusé par cette version de l'API : on redemande du JSON simple, la consigne décrit déjà les champs.
     if (err.status !== 400 || err.keyError) throw err;
     response = await call({ contents, generationConfig: { responseMimeType: 'application/json' } }, key);
   }
   return parse(response);
 }
+
+// Lit un ticket et renvoie les champs du schéma. context : { today, titles, categories, modes } (listes de textes).
+export const readTicket = (file, context) => ask(file, prompt(context), SCHEMA, 1600);
+
+// ---------- Capture d'écran de l'appli de la banque (pointage) ----------
+const STATEMENT_SCHEMA = {
+  type: 'object',
+  properties: {
+    lisible: { type: 'boolean' },
+    solde: { type: ['number', 'null'] },
+    lignes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          date: { type: ['string', 'null'] },
+          libelle: { type: 'string' },
+          montant: { type: 'number' },
+          en_cours: { type: 'boolean' },
+        },
+        required: ['date', 'libelle', 'montant', 'en_cours'],
+      },
+    },
+  },
+  required: ['lisible', 'solde', 'lignes'],
+};
+
+const statementPrompt = today => `Tu lis la capture d'écran de l'application d'une banque qui montre la liste des opérations d'un compte.
+Réponds uniquement par un objet JSON avec ces champs :
+- lisible : false si l'image ne montre pas une liste d'opérations bancaires, sinon true.
+- solde : le solde du compte s'il est affiché (nombre avec un point décimal, négatif si le compte est débiteur), sinon null.
+- lignes : chaque opération visible, de haut en bas, avec :
+  - date : au format AAAA-MM-JJ. Nous sommes le ${today}. Les dates sont souvent des titres de groupe (« Aujourd'hui », « Hier », « Lundi 3 novembre ») : applique-les aux opérations du groupe. Une date sans année est la plus récente qui ne dépasse pas aujourd'hui. null si aucune date n'est visible.
+  - libelle : le libellé tel qu'il est affiché.
+  - montant : nombre avec un point décimal, NÉGATIF pour un débit (dépense, prélèvement, paiement par carte), POSITIF pour un crédit (virement reçu, remboursement). Indices : un signe « - » ou un montant rouge ou noir est un débit ; un « + » ou un montant vert est un crédit.
+  - en_cours : true si l'opération est marquée « en cours », « à venir », « en attente » ou « non débitée », sinon false.
+N'invente aucune ligne. Ignore une ligne coupée en haut ou en bas de l'image.`;
+
+// Lit une capture de compte. Résolution plus haute que pour un ticket : les listes bancaires sont écrites petit.
+export const readStatement = (file, today) => ask(file, statementPrompt(today), STATEMENT_SCHEMA, 2200);

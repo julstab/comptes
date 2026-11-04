@@ -262,6 +262,16 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
 .report { margin-top: 12px; padding: 12px; border-radius: 10px; background: var(--accent-soft); font-size: 14px; }
 .btn svg { width: 20px; height: 20px; flex: none; }
 .photo-report { display: flex; align-items: center; gap: 12px; }
+
+/* Pointage par capture */
+.stmt-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); cursor: pointer; }
+.stmt-row:first-child { border-top: 0; }
+.stmt-row input { width: 22px; height: 22px; min-height: 0; margin: 0; accent-color: var(--accent); }
+.stmt-dot { width: 22px; }
+.stmt-main { min-width: 0; }
+.stmt-title { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stmt-main .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stmt-actions { position: sticky; bottom: 0; z-index: 2; padding: 12px 0 max(12px, env(safe-area-inset-bottom)); background: linear-gradient(transparent, var(--bg) 35%); }
 .photo-report img { width: 56px; height: 56px; flex: none; object-fit: cover; border-radius: 8px; }
 .report.error { background: color-mix(in srgb, var(--neg) 14%, transparent); }
 .stack { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }

@@ -1,5 +1,5 @@
 // Fonctionnement hors ligne : réseau d'abord, copie en cache si le réseau manque.
-const CACHE = 'comptes-v6';
+const CACHE = 'comptes-v7';
 const SHARE_CACHE = 'comptes-partage'; // photo reçue par le menu « Partager » d'Android, le temps que la page la reprenne
 const ASSETS = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',

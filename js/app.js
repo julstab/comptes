@@ -57,6 +57,7 @@ const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
 let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
 let autoPhoto = false;   // raccourci « Ticket » de l'accueil : ouvre l'appareil photo dès l'ouverture du formulaire
+let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
 
 // ---------- Navigation ----------
 let navDepth = 0;
@@ -71,6 +72,7 @@ const routes = [
   [/^#\/operation\/(\w+)$/, id => viewEntryForm(id, null)],
   [/^#\/nouvelle-operation\/(\w+)$/, acc => viewEntryForm(null, acc)],
   [/^#\/photo$/, () => viewSharedPhoto()],
+  [/^#\/pointage\/(\w+)$/, acc => viewStatement(acc)],
   [/^#\/recurrentes$/, () => viewOrders()],
   [/^#\/recurrente\/(\w+)$/, id => viewOrderForm(id)],
   [/^#\/nouvelle-recurrente$/, () => viewOrderForm(null)],
@@ -202,12 +204,21 @@ function viewAccount(id) {
     <div class="toolbar">
       <input type="search" id="q" placeholder="Rechercher : libellé, catégorie, montant…" value="${esc(ui.q)}" aria-label="Rechercher">
       <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">Non pointées</button>
+      <button type="button" class="chip" data-action="statement">📷 Pointer avec une capture</button>
       <a class="chip" href="#/compte/${id}/modifier">Modifier le compte</a>
     </div>
+    <input type="file" id="stmt" accept="image/*" multiple hidden>
     <div id="ops"></div>
     <a class="fab" href="#/nouvelle-operation/${id}" aria-label="Nouvelle opération">${ICON_PLUS}</a>`;
   renderSummary(id);
   renderOps(id);
+  $('#stmt').addEventListener('change', ev => {
+    const files = [...ev.target.files];
+    ev.target.value = '';
+    if (!files.length) return;
+    pendingStatement = { acc: id, files };
+    location.hash = `#/pointage/${id}`;
+  });
   let t;
   $('#q').addEventListener('input', ev => {
     clearTimeout(t);
@@ -529,6 +540,134 @@ async function viewSharedPhoto() {
   if (!file || !acc) return location.replace('#/');
   pendingPhoto = file;
   location.replace(`#/nouvelle-operation/${acc}`);
+}
+
+// ---------- Écran : pointage à partir de captures de l'appli de la banque ----------
+const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
+
+// Rapproche chaque ligne de la banque d'une opération du compte : même montant, à 10 jours près (la date
+// de débit diffère souvent de celle du ticket). La plus proche en date l'emporte, à écart égal une non pointée.
+function matchStatement(accId, lines) {
+  const entries = (store.idx.byAcc.get(accId) ?? []).filter(e => !e.init);
+  const today = store.todayStr();
+  const used = new Set();
+  const find = (line, amt) => {
+    let best = null, bestScore = Infinity;
+    for (const e of entries) {
+      if (e.amt !== amt || used.has(e.id)) continue;
+      const gap = Math.abs(dayDiff(e.date, line.date ?? today));
+      if (gap > (line.date ? 10 : 45)) continue;
+      const score = gap * 2 + (e.chk ? 1 : 0);
+      if (score < bestScore) { best = e; bestScore = score; }
+    }
+    return best;
+  };
+  return lines.map(line => {
+    const cents = Math.round(Number(line.montant) * 100);
+    // Si Gemini s'est trompé de signe, la ligne est retrouvée avec le signe inverse.
+    const entry = cents ? find(line, cents) ?? find(line, -cents) : null;
+    if (entry) used.add(entry.id);
+    const status = !entry ? 'absent' : entry.chk ? 'deja' : line.en_cours ? 'en_cours' : 'a_pointer';
+    return { line, cents, entry, status };
+  });
+}
+
+async function viewStatement(acc) {
+  const a = store.idx.acc.get(acc);
+  const job = pendingStatement;
+  pendingStatement = null;
+  if (!a || job?.acc !== acc) return location.replace(`#/compte/${acc}`);
+  setHeader('📷 Pointage', true);
+  const hash = currentHash;
+  const lines = [], seen = new Map();
+  let bank = null;
+  for (const [k, file] of job.files.entries()) {
+    view.innerHTML = `<p class="empty">📷 Lecture de la capture ${k + 1} sur ${job.files.length}…</p>`;
+    let r;
+    try {
+      r = await ticket.readStatement(file, store.todayStr());
+    } catch (err) {
+      if (currentHash !== hash) return;
+      view.innerHTML = `<p class="report error">${esc(err.message)}</p>
+        <a class="btn ghost block" href="#/compte/${acc}">Retour au compte</a>`;
+      return;
+    }
+    if (currentHash !== hash) return; // l'utilisateur est parti entre-temps
+    if (r.lisible === false) continue;
+    if (bank === null && typeof r.solde === 'number') bank = Math.round(r.solde * 100);
+    // Deux captures successives se chevauchent souvent : une ligne identique vue sur une autre capture est un doublon.
+    for (const l of r.lignes ?? []) {
+      const key = `${l.date}|${l.montant}|${norm(l.libelle)}`;
+      if (seen.has(key) && seen.get(key) !== k) continue;
+      seen.set(key, k);
+      lines.push(l);
+    }
+  }
+  if (!lines.length) {
+    view.innerHTML = `<p class="empty">Aucune opération lue sur ${job.files.length > 1
+      ? "ces captures. Vérifiez qu'elles montrent" : "cette capture. Vérifiez qu'elle montre"} la liste des opérations du compte.</p>
+      <a class="btn ghost block" href="#/compte/${acc}">Retour au compte</a>`;
+    return;
+  }
+  renderStatement(a, matchStatement(acc, lines), bank, job.files.length);
+}
+
+function renderStatement(a, rows, bank, shots) {
+  const GROUPS = [
+    ['a_pointer', '✅ À pointer', true],
+    ['en_cours', '⏳ En cours à la banque', true],
+    ['deja', '☑️ Déjà pointées', false],
+    ['absent', '❓ Introuvables dans l\'appli', false],
+  ];
+  const row = (r, i, selectable) => `
+    <label class="stmt-row">
+      ${selectable ? `<input type="checkbox" data-i="${i}" ${r.status === 'a_pointer' ? 'checked' : ''}>` : '<span class="stmt-dot" aria-hidden="true"></span>'}
+      <span class="stmt-main">
+        <span class="stmt-title">${esc(r.line.libelle || '(sans libellé)')}</span>
+        <span class="sub">${r.line.date ? fullDate(r.line.date) : 'date non lue'}${r.entry
+          ? ` · ↳ ${esc(r.entry.title || '(sans libellé)')} du ${dayMonth(r.entry.date)}` : ''}</span>
+      </span>
+      <span class="amt ${(r.entry?.amt ?? r.cents) > 0 ? 'pos' : ''}">${signed(r.entry?.amt ?? r.cents)}</span>
+    </label>`;
+  view.innerHTML = `
+    <section class="card">
+      <h2>${esc(a.name)}</h2>
+      <p class="muted">${plural(rows.length, 'opération lue', 'opérations lues')} sur ${plural(shots, 'capture', 'captures')}.
+        Cochez celles à pointer : rien n'est modifié d'autre.</p>
+      <div id="stmt-check"></div>
+    </section>
+    ${GROUPS.map(([status, title, selectable]) => {
+      const list = rows.map((r, i) => [r, i]).filter(([r]) => r.status === status);
+      return list.length ? `<h2 class="section-title">${title} <small>${list.length}</small></h2>
+        <div class="list">${list.map(([r, i]) => row(r, i, selectable)).join('')}</div>` : '';
+    }).join('')}
+    <div class="actions stmt-actions">
+      <button class="btn primary" type="button" id="stmt-ok"></button>
+      <a class="btn ghost" href="#/compte/${a.id}">Annuler</a>
+    </div>`;
+
+  const selected = () => [...view.querySelectorAll('.stmt-row input:checked')].map(cb => rows[+cb.dataset.i].entry);
+  const update = () => {
+    const chosen = selected();
+    const ok = $('#stmt-ok');
+    ok.textContent = chosen.length ? `Pointer ${plural(chosen.length, 'opération', 'opérations')}` : 'Rien à pointer';
+    ok.disabled = !chosen.length;
+    // Contrôle : solde pointé après validation, comparé au solde affiché par la banque.
+    const after = store.balances(a.id).chk + sum(chosen.map(e => e.amt));
+    $('#stmt-check').innerHTML = bank === null ? ''
+      : after === bank
+        ? `<p class="report">✅ Solde pointé après validation : ${money(after)}, identique au solde affiché par la banque.</p>`
+        : `<p class="report error">⚠️ Solde pointé après validation : ${money(after)}, la banque affiche ${money(bank)} (écart de ${signed(bank - after)}).</p>`;
+  };
+  view.querySelectorAll('.stmt-row input').forEach(cb => cb.addEventListener('change', update));
+  update();
+  $('#stmt-ok').addEventListener('click', async () => {
+    const chosen = selected();
+    if (!chosen.length) return;
+    await store.upsertMany(chosen.map(e => ['entries', { ...e, chk: true }]));
+    toast(`✅ ${plural(chosen.length, 'opération pointée', 'opérations pointées')}`);
+    location.replace(`#/compte/${a.id}`);
+  });
 }
 
 // ---------- Écrans : opérations récurrentes ----------
@@ -1158,6 +1297,14 @@ const actions = {
     statsUi.tab = 'one';
     statsUi.cat = el.dataset.cat;
     location.hash = '#/statistiques';
+  },
+  statement() {
+    if (!ticket.getKey()) {
+      toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+      location.hash = '#/reglages';
+      return;
+    }
+    $('#stmt').click();
   },
   'quick-photo'() {
     autoPhoto = true;
