@@ -3,6 +3,7 @@ import * as store from './store.js';
 import * as drive from './drive.js';
 import { convertBackup, parseBackupText } from './import.js';
 import * as recur from './recur.js';
+import * as stats from './stats.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -67,6 +68,8 @@ const routes = [
   [/^#\/recurrentes$/, () => viewOrders()],
   [/^#\/recurrente\/(\w+)$/, id => viewOrderForm(id)],
   [/^#\/nouvelle-recurrente$/, () => viewOrderForm(null)],
+  [/^#\/statistiques$/, () => viewStats(null)],
+  [/^#\/statistiques\/categorie\/(\w+)$/, id => viewStats(id)],
   [/^#\/reglages$/, () => viewSettings()],
 ];
 
@@ -94,7 +97,7 @@ $('#back').addEventListener('click', () => goBack());
 // Re-dessine l'écran courant (après une synchro) s'il ne contient pas de formulaire en cours.
 function refreshListView() {
   if (currentHash === '#/reglages') return renderDataCard();
-  if (/^#\/?$|^#\/compte\/\w+$|^#\/recurrentes$/.test(currentHash)) {
+  if (/^#\/?$|^#\/compte\/\w+$|^#\/recurrentes$|^#\/statistiques/.test(currentHash)) {
     scrollMem.set(currentHash, scrollY);
     render();
   }
@@ -134,6 +137,9 @@ function viewAccounts() {
     <div class="list">${open.map(card).join('')}</div>
     <div class="list"><a class="acc" href="#/recurrentes">
       <span class="acc-main"><span class="acc-name">Opérations récurrentes</span><span class="acc-bank">${plural(running, 'en cours', 'en cours')}</span></span>
+      <span class="acc-bal sub" aria-hidden="true">›</span>
+    </a><a class="acc" href="#/statistiques">
+      <span class="acc-main"><span class="acc-name">Statistiques</span><span class="acc-bank">Par catégorie, par mois, soldes</span></span>
       <span class="acc-bal sub" aria-hidden="true">›</span>
     </a></div>
     ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
@@ -541,6 +547,247 @@ async function runRecurrences() {
   refreshListView();
 }
 
+// ---------- Écran : statistiques ----------
+const statsUi = { tab: 'cat', period: {}, acc: '', cat: '' };
+const STATS_TABS = [['cat', 'Catégories'], ['mois', 'Par mois'], ['one', 'Une catégorie'], ['soldes', 'Soldes']];
+const DEFAULT_PERIOD = { cat: 'm12', mois: 'm12', one: 'm36', soldes: 'all' };
+const NO_CAT = 'sans'; // « sans catégorie » dans l'adresse
+const shortMonth = new Intl.DateTimeFormat('fr-FR', { month: 'short' });
+const pct = (v, total) => (total ? `${Math.round(v * 100 / total)} %` : '');
+const catName = k => (k ? store.idx.cat.get(k)?.name ?? '?' : 'Sans catégorie');
+const sum = arr => arr.reduce((s, v) => s + v, 0);
+let statsArgs = null;
+
+function firstEntryDate() {
+  let min = store.todayStr();
+  for (const list of store.idx.byAcc.values()) if (list.length && list[0].date < min) min = list[0].date;
+  return min;
+}
+
+function periodOptions(tab) {
+  const today = store.todayStr();
+  const Y = +today.slice(0, 4), M = +today.slice(5, 7);
+  const monthStart = back => store.todayStr(new Date(Y, M - 1 - back, 1));
+  const first = firstEntryDate();
+  const opts = [];
+  if (tab === 'cat') {
+    opts.push({ id: 'cur', label: 'Ce mois-ci', from: monthStart(0), to: today, unit: 'month' });
+    opts.push({ id: 'prev', label: 'Le mois dernier', from: monthStart(1), to: store.todayStr(new Date(Y, M - 1, 0)), unit: 'month' });
+  }
+  opts.push({ id: 'm12', label: '12 derniers mois', from: monthStart(11), to: today, unit: 'month' });
+  if (tab === 'one' || tab === 'soldes') opts.push({ id: 'm36', label: '3 dernières années', from: monthStart(35), to: today, unit: 'month' });
+  for (let y = Y; y >= +first.slice(0, 4); y--) {
+    opts.push({ id: `y${y}`, label: `Année ${y}`, from: `${y}-01-01`, to: y === Y ? today : `${y}-12-31`, unit: 'month' });
+  }
+  opts.push({ id: 'all', label: 'Depuis le début', from: first, to: today, unit: tab === 'soldes' ? 'month' : 'year' });
+  return opts;
+}
+
+const bucketCats = bks => bks.map(b => (b.key.length === 4
+  ? { key: b.key, short: b.key, long: b.key }
+  : { key: b.key, short: shortMonth.format(new Date(+b.key.slice(0, 4), +b.key.slice(5, 7) - 1, 1)), long: monthLabel(b.from) }));
+
+const tiles = list => `<div class="tiles">${list.map(([label, html]) => `
+  <div class="tile"><span class="label">${esc(label)}</span><span class="val">${html}</span></div>`).join('')}</div>`;
+
+const tableView = (head, rows) => `<details class="viz-table"><summary>Voir le tableau</summary><table>
+  <thead><tr>${head.map(h => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead>
+  <tbody>${rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></details>`;
+
+// Barres classées : rows = [{ key, mag (centimes, positif), cls ('in' | 'out'), name, text, href? }].
+function rankCard(title, rows, total) {
+  if (!rows.length) return '';
+  const max = rows[0].mag || 1;
+  return `<section class="card"><h2>${esc(title)}</h2><div class="rank">${rows.map(r => {
+    const tag = r.href ? 'a' : 'div';
+    return `<${tag} class="rank-row"${r.href ? ` href="${r.href}"` : ''}>
+      <span class="rank-head"><span class="rank-name">${esc(r.name)}</span><span class="rank-val">${esc(r.text)}<small> · ${pct(r.mag, total)}</small></span></span>
+      <span class="rank-track"><span class="rank-bar ${r.cls}" style="width:${Math.max(0.5, r.mag * 100 / max).toFixed(2)}%"></span></span>
+    </${tag}>`;
+  }).join('')}</div></section>`;
+}
+
+function topExpenseCat(accIds, reps) {
+  const p = periodOptions('one').find(o => o.id === 'm12');
+  const net = stats.sumBy(stats.pick(accIds, p.from, p.to), e => stats.groupKey(e.cat));
+  let best = '', min = 0;
+  for (const [k, v] of net) if (k && v < min) { min = v; best = k; }
+  return reps.get(best) || [...reps.values()][0] || '';
+}
+
+function viewStats(drill) {
+  if (!store.idx.acc.size) return location.replace('#/');
+  const key = drill === NO_CAT ? '' : drill;
+  if (key && !store.idx.cat.has(key)) return location.replace('#/statistiques');
+  const tab = drill == null ? statsUi.tab : 'cat';
+  setHeader(drill == null ? 'Statistiques' : catName(key), true);
+  view.innerHTML = `
+    ${drill == null ? `<div class="toolbar">${STATS_TABS.map(([id, label]) => `
+      <button type="button" class="chip ${tab === id ? 'on' : ''}" data-action="stats-tab" data-tab="${id}" aria-pressed="${tab === id}">${label}</button>`).join('')}</div>` : ''}
+    <div class="toolbar filters" id="st-filters"></div>
+    <div id="st-body"></div>`;
+  renderStats(tab, drill == null ? null : key);
+}
+
+function renderStats(tab = statsArgs[0], key = statsArgs[1]) {
+  statsArgs = [tab, key];
+  const opts = periodOptions(tab);
+  const p = opts.find(o => o.id === (statsUi.period[tab] ?? DEFAULT_PERIOD[tab])) ?? opts.find(o => o.id === DEFAULT_PERIOD[tab]);
+  const accs = [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos);
+  if (statsUi.acc && !store.idx.acc.has(statsUi.acc)) statsUi.acc = '';
+  const accIds = statsUi.acc ? [statsUi.acc] : accs.map(a => a.id);
+  const reps = stats.groupReps();
+  if (tab === 'one') {
+    statsUi.cat = store.idx.cat.has(statsUi.cat) ? reps.get(stats.groupKey(statsUi.cat, 'sub')) : topExpenseCat(accIds, reps);
+  }
+
+  const cats = [...reps.values()].map(id => store.idx.cat.get(id)).sort((a, b) => catLabel(a.id).localeCompare(catLabel(b.id), 'fr'));
+  $('#st-filters').innerHTML = `
+    <select id="st-period" aria-label="Période">${opts.map(o => `<option value="${o.id}" ${o.id === p.id ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+    <select id="st-acc" aria-label="Comptes"><option value="">Tous les comptes</option>${accs.map(a => `
+      <option value="${a.id}" ${a.id === statsUi.acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+    ${tab === 'one' ? `<select id="st-cat" aria-label="Catégorie">${[['D', 'Dépenses'], ['R', 'Recettes']].map(([t, label]) => `
+      <optgroup label="${label}">${cats.filter(c => c.type === t).map(c => `
+        <option value="${c.id}" ${c.id === statsUi.cat ? 'selected' : ''}>${esc(catLabel(c.id))}</option>`).join('')}</optgroup>`).join('')}</select>` : ''}`;
+  $('#st-period').onchange = ev => { statsUi.period[tab] = ev.target.value; renderStats(); };
+  $('#st-acc').onchange = ev => { statsUi.acc = ev.target.value; renderStats(); };
+  if (tab === 'one') $('#st-cat').onchange = ev => { statsUi.cat = ev.target.value; renderStats(); };
+
+  const body = $('#st-body');
+  const scope = `${p.label} · ${statsUi.acc ? store.idx.acc.get(statsUi.acc).name : 'tous les comptes'}`;
+  if (key != null) return statsDrill(body, key, p, accIds, scope, reps);
+  ({ cat: statsCategories, mois: statsMonths, one: statsOneCat, soldes: statsBalances })[tab](body, p, accIds, scope, reps);
+}
+
+function statsCategories(body, p, accIds, scope, reps) {
+  const entries = stats.pick(accIds, p.from, p.to);
+  if (!entries.length) { body.innerHTML = '<p class="empty">Aucune opération sur cette période.</p>'; return; }
+  const net = [...stats.sumBy(entries, e => stats.groupKey(e.cat))];
+  const row = ([k, v]) => {
+    const id = reps.get(k) ?? '';
+    return { key: k, mag: Math.abs(v), cls: v < 0 ? 'out' : 'in', name: catName(id), text: money(Math.abs(v)), href: `#/statistiques/categorie/${id || NO_CAT}` };
+  };
+  const outs = net.filter(([, v]) => v < 0).map(row).sort((a, b) => b.mag - a.mag);
+  const ins = net.filter(([, v]) => v > 0).map(row).sort((a, b) => b.mag - a.mag);
+  const tOut = sum(outs.map(r => r.mag)), tIn = sum(ins.map(r => r.mag));
+  body.innerHTML = `
+    ${tiles([['Recettes nettes', money(tIn)], ['Dépenses nettes', money(tOut)], ['Différence', `<span class="amt ${negClass(tIn - tOut)}">${signed(tIn - tOut)}</span>`]])}
+    ${rankCard('Dépenses nettes par catégorie', outs, tOut)}
+    ${rankCard('Recettes nettes par catégorie', ins, tIn)}
+    <p class="hint">Montants nets : remboursements déduits, virements entre vos comptes annulés. Touchez une catégorie pour le détail.</p>`;
+}
+
+function statsDrill(body, key, p, accIds, scope, reps) {
+  const gk = stats.groupKey(key);
+  const ents = stats.pick(accIds, p.from, p.to).filter(e => stats.groupKey(e.cat) === gk)
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const net = sum(ents.map(e => e.amt));
+  const subKey = e => { const s = stats.groupKey(e.cat, 'sub'); return s === gk ? '' : s; };
+  const subs = [...stats.sumBy(ents, subKey)]
+    .map(([k, v]) => ({ key: k, mag: Math.abs(v), cls: v < 0 ? 'out' : 'in', text: signed(v),
+      name: k ? catName(reps.get(k)) : key ? `${catName(key)} (sans sous-catégorie)` : 'Sans catégorie' }))
+    .sort((a, b) => b.mag - a.mag);
+  const LIMIT = 200;
+  body.innerHTML = `
+    <section class="card">
+      <span class="label">${esc(scope)}</span>
+      <span class="amt big ${negClass(net)}">${signed(net)}</span>
+      ${key ? `<div class="stack"><button type="button" class="btn ghost" data-action="stats-cat-time" data-cat="${key}">Voir mois par mois</button></div>` : ''}
+    </section>
+    ${subs.length > 1 ? rankCard('Par sous-catégorie', subs, sum(subs.map(r => r.mag))) : ''}
+    <h2>${plural(ents.length, 'opération', 'opérations')}</h2>
+    ${ents.length ? `<div class="list">${ents.slice(0, LIMIT).map(e => `
+      <a class="acc" href="#/operation/${e.id}">
+        <span class="acc-main"><span class="acc-name">${esc(e.title || '(sans libellé)')}</span>
+          <span class="acc-bank">${esc([fullDate(e.date), store.idx.acc.get(e.acc)?.name, subKey(e) ? catName(e.cat) : ''].filter(Boolean).join(' · '))}</span></span>
+        <span class="acc-bal"><span class="amt ${e.amt > 0 ? 'pos' : ''}">${signed(e.amt)}</span></span>
+      </a>`).join('')}</div>` : '<p class="empty">Aucune opération sur cette période.</p>'}
+    ${ents.length > LIMIT ? `<p class="hint">Seules les ${LIMIT} plus récentes sont affichées.</p>` : ''}`;
+}
+
+function statsMonths(body, p, accIds, scope) {
+  const bks = stats.buckets(p.from, p.to, p.unit);
+  const byBucket = new Map(bks.map(b => [b.key, []]));
+  for (const e of stats.pick(accIds, p.from, p.to)) byBucket.get(stats.bucketKey(e.date, p.unit))?.push(e);
+  const io = bks.map(b => stats.inOut(byBucket.get(b.key)));
+  const ins = io.map(x => x.in), outs = io.map(x => x.out);
+  const cats = bucketCats(bks);
+  const per = p.unit === 'year' ? 'année' : 'mois';
+  body.innerHTML = `
+    ${tiles([['Recettes nettes', money(sum(ins))], ['Dépenses nettes', money(sum(outs))], ['Différence', `<span class="amt ${negClass(sum(ins) - sum(outs))}">${signed(sum(ins) - sum(outs))}</span>`]])}
+    <section class="card">
+      <h2>Recettes et dépenses nettes par ${per}</h2>
+      <p class="muted">${esc(scope)}</p>
+      <div class="legend"><span><i class="in"></i>Recettes</span><span><i class="out"></i>Dépenses</span></div>
+      <div class="viz" id="viz"></div>
+      ${tableView([per === 'mois' ? 'Mois' : 'Année', 'Recettes', 'Dépenses', 'Différence'], cats.map((c, i) => [c.long, money(ins[i]), money(outs[i]), signed(ins[i] - outs[i])]))}
+    </section>`;
+  stats.renderColumns($('#viz'), {
+    cats, fmt: money, label: `Recettes et dépenses nettes par ${per}`,
+    series: [{ name: 'Recettes', cls: 's-in', color: '--viz-in', values: ins }, { name: 'Dépenses', cls: 's-out', color: '--viz-out', values: outs }],
+  });
+}
+
+function statsOneCat(body, p, accIds, scope) {
+  const c = store.idx.cat.get(statsUi.cat);
+  if (!c) { body.innerHTML = '<p class="empty">Aucune catégorie.</p>'; return; }
+  const isRoot = stats.rootOf(c.id) === c.id;
+  const gk = stats.groupKey(c.id, 'sub');
+  const sign = c.type === 'R' ? 1 : -1;
+  const bks = stats.buckets(p.from, p.to, p.unit);
+  const totals = new Map(bks.map(b => [b.key, 0]));
+  for (const e of stats.pick(accIds, p.from, p.to)) {
+    if (stats.groupKey(e.cat, isRoot ? 'root' : 'sub') !== gk) continue;
+    const k = stats.bucketKey(e.date, p.unit);
+    if (totals.has(k)) totals.set(k, totals.get(k) + sign * e.amt);
+  }
+  const values = bks.map(b => totals.get(b.key));
+  const cats = bucketCats(bks);
+  const per = p.unit === 'year' ? 'année' : 'mois';
+  const what = c.type === 'R' ? 'Recettes nettes' : 'Dépenses nettes';
+  body.innerHTML = `
+    ${tiles([['Total', money(sum(values))], [`Moyenne par ${per}`, money(Math.round(sum(values) / values.length))]])}
+    <section class="card">
+      <h2>${esc(catLabel(c.id))}</h2>
+      <p class="muted">${what} par ${per} · ${esc(scope)}</p>
+      <div class="viz" id="viz"></div>
+      ${tableView([per === 'mois' ? 'Mois' : 'Année', what], cats.map((x, i) => [x.long, money(values[i])]))}
+    </section>`;
+  stats.renderColumns($('#viz'), {
+    cats, fmt: money, label: `${catLabel(c.id)} : ${what.toLowerCase()} par ${per}`,
+    series: [{ name: what, cls: c.type === 'R' ? 's-in' : 's-out', color: c.type === 'R' ? '--viz-in' : '--viz-out', values }],
+  });
+}
+
+function statsBalances(body, p, accIds, scope) {
+  const bks = stats.buckets(p.from, p.to, 'month');
+  const values = stats.balanceSeries(accIds, bks);
+  const d = new Date(+p.from.slice(0, 4), +p.from.slice(5, 7) - 1, +p.from.slice(8, 10) - 1);
+  const start = stats.balanceSeries(accIds, [{ to: store.todayStr(d) }])[0];
+  const last = values[values.length - 1];
+  const cats = bucketCats(bks);
+  body.innerHTML = `
+    ${tiles([[`Solde au ${fullDate(p.to)}`, `<span class="amt ${negClass(last)}">${money(last)}</span>`], ['Évolution sur la période', `<span class="amt ${negClass(last - start)}">${signed(last - start)}</span>`]])}
+    <section class="card">
+      <h2>Solde en fin de mois</h2>
+      <p class="muted">${esc(scope)}</p>
+      <div class="viz" id="viz"></div>
+      ${tableView(['Mois', 'Solde'], cats.map((c, i) => [c.long, money(values[i])]))}
+    </section>`;
+  stats.renderLine($('#viz'), { cats, values, fmt: money, name: 'Solde', label: 'Solde en fin de mois' });
+}
+
+// Les graphiques sont dessinés à la largeur de l'écran : on les redessine quand elle change.
+let lastWidth = innerWidth, resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (innerWidth === lastWidth) return;
+    lastWidth = innerWidth;
+    if (statsArgs && $('#viz')) renderStats();
+  }, 200);
+});
+
 // ---------- Écran : création / modification d'un compte ----------
 function viewAccountForm(id) {
   const a = id ? store.idx.acc.get(id) : null;
@@ -700,6 +947,15 @@ const actions = {
   more() {
     acctUi[currentAccId].limit += 200;
     renderOps(currentAccId);
+  },
+  'stats-tab'(el) {
+    statsUi.tab = el.dataset.tab;
+    viewStats(null);
+  },
+  'stats-cat-time'(el) {
+    statsUi.tab = 'one';
+    statsUi.cat = el.dataset.cat;
+    location.hash = '#/statistiques';
   },
   'drive-login': () => drive.signIn().catch(err => toast(err.message)),
   'drive-sync': () => drive.sync(),

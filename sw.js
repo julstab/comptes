@@ -1,8 +1,8 @@
 // Fonctionnement hors ligne : réseau d'abord, copie en cache si le réseau manque.
-const CACHE = 'comptes-v2';
+const CACHE = 'comptes-v3';
 const ASSETS = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',
-  'js/app.js', 'js/store.js', 'js/import.js', 'js/drive.js', 'js/config.js', 'js/recur.js',
+  'js/app.js', 'js/store.js', 'js/import.js', 'js/drive.js', 'js/config.js', 'js/recur.js', 'js/stats.js',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

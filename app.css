@@ -197,6 +197,63 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
 .report.error { background: color-mix(in srgb, var(--neg) 14%, transparent); }
 .stack { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 
+/* ---------- Statistiques ---------- */
+/* Couleurs des séries (palette validée : contraste, daltonisme, mode sombre). Recettes = bleu, dépenses = orange. */
+:root { --viz-in: #2a78d6; --viz-out: #eb6834; --viz-grid: #eceef1; --viz-axis: #c4c9d1; }
+@media (prefers-color-scheme: dark) {
+  :root { --viz-in: #3987e5; --viz-out: #d95926; --viz-grid: #252930; --viz-axis: #3b414b; }
+}
+.filters select { flex: 1 1 150px; width: auto; min-width: 0; max-width: 100%; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; }
+.tile .val { display: block; margin-top: 2px; font-size: 20px; font-weight: 650; white-space: nowrap; }
+
+.rank { display: grid; }
+.rank-row { display: grid; gap: 6px; padding: 9px 0; color: inherit; text-decoration: none; border-top: 1px solid var(--border); }
+.rank-row:first-child { border-top: 0; }
+a.rank-row:hover .rank-name { text-decoration: underline; }
+.rank-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.rank-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-val { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rank-val small { color: var(--muted); font-size: 12.5px; }
+.rank-track { display: block; height: 10px; }
+.rank-bar { display: block; height: 100%; min-width: 2px; border-radius: 0 4px 4px 0; }
+.rank-bar.in, .legend i.in { background: var(--viz-in); }
+.rank-bar.out, .legend i.out { background: var(--viz-out); }
+
+.legend { display: flex; gap: 16px; margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+.viz { position: relative; }
+.viz svg { display: block; width: 100%; overflow: visible; touch-action: pan-y; outline-offset: 4px; }
+.viz svg:focus:not(:focus-visible) { outline: none; }
+.viz .grid { stroke: var(--viz-grid); stroke-width: 1; }
+.viz .base { stroke: var(--viz-axis); stroke-width: 1; }
+.viz .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.viz .s-in { fill: var(--viz-in); }
+.viz .s-out { fill: var(--viz-out); }
+.viz.hover .bar { opacity: .35; }
+.viz.hover .bar.hl { opacity: 1; }
+.viz .line { fill: none; stroke: var(--viz-in); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.viz .area { fill: var(--viz-in); opacity: .1; }
+.viz .dot { fill: var(--viz-in); stroke: var(--surface); stroke-width: 2; }
+.viz .cross { stroke: var(--viz-axis); stroke-width: 1; }
+.viz .end { fill: var(--text); font-size: 12px; font-weight: 600; }
+.viz-tip {
+  position: absolute; top: -8px; z-index: 3; min-width: 150px; padding: 8px 10px; pointer-events: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); font-size: 13px;
+}
+.viz-tip b { display: block; margin-bottom: 4px; font-weight: 500; color: var(--muted); }
+.viz-tip div { display: flex; align-items: center; gap: 8px; }
+.viz-tip strong { font-variant-numeric: tabular-nums; }
+.viz-tip span { color: var(--muted); }
+.viz-tip i { flex: none; width: 12px; height: 2px; border-radius: 1px; }
+.viz-table { margin-top: 8px; font-size: 14px; }
+.viz-table summary { padding: 8px 0; color: var(--muted); cursor: pointer; }
+.viz-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.viz-table th, .viz-table td { padding: 6px 4px; border-top: 1px solid var(--border); text-align: right; white-space: nowrap; }
+.viz-table th { font-weight: 600; color: var(--muted); }
+.viz-table th:first-child, .viz-table td:first-child { text-align: left; white-space: normal; }
+
 @media (max-width: 420px) {
   .grid2 { grid-template-columns: 1fr; }
   .amt.big { font-size: 24px; }
