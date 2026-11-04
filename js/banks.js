@@ -11,7 +11,7 @@ const BANKS = [
   [/\bn26\b/, 'n26.com', '#2f8f7c'],
   [/deblock/, 'deblock.com', '#3a3a3a'],
   [/trade republic/, 'traderepublic.com', '#1a1a1a'],
-  [/hello ?bank/, 'hellobank.fr', '#0096d6'],
+  [/hello ?bank/, 'www.hellobank.fr', '#0096d6'], // sans « www », Google n'a pas d'icône
   [/credit agricole/, 'credit-agricole.fr', '#00848a'],
   [/caisse d.?epargne/, 'caisse-epargne.fr', '#c4001a'],
   [/banque postale/, 'labanquepostale.fr', '#0f3c8c'],
