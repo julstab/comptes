@@ -112,11 +112,14 @@ export const upsert = (coll, rec) => upsertMany([[coll, rec]]);
 export async function upsertMany(items) {
   data ??= emptyData();
   const mod = new Date().toISOString();
+  const pos = {}; // pour les gros lots (suppression d'un compte) : position de chaque identifiant, calculée une fois
   for (const [coll, rec] of items) {
     rec.mod = mod;
     const arr = data[coll];
-    const i = arr.findIndex(r => r.id === rec.id);
-    if (i >= 0) arr[i] = rec; else arr.push(rec);
+    if (items.length > 50) pos[coll] ??= new Map(arr.map((r, k) => [r.id, k]));
+    const i = pos[coll] ? pos[coll].get(rec.id) ?? -1 : arr.findIndex(r => r.id === rec.id);
+    if (i >= 0) arr[i] = rec;
+    else { pos[coll]?.set(rec.id, arr.length); arr.push(rec); }
   }
   await commit('local');
 }

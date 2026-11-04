@@ -120,6 +120,10 @@ function defaultAccId() {
   return accs.some(a => a.id === acc) ? acc : accs[0]?.id;
 }
 
+// Type de compte : choisi dans le formulaire du compte, sinon deviné d'après son nom.
+const SAVINGS = /livret|epargne|assurance.?vie|\bpea\b|\bldds?\b|\blep\b|\bpel\b|\bcel\b|\bper\b|compte a terme/;
+const accKind = a => a.kind ?? (SAVINGS.test(norm(a.name)) ? 'epargne' : 'courant');
+
 function viewAccounts() {
   setHeader('💰 Comptes', false);
   if (!store.idx.acc.size) {
@@ -148,7 +152,12 @@ function viewAccounts() {
   };
   const open = accs.filter(a => !a.closed);
   const closed = accs.filter(a => a.closed);
-  const total = open.reduce((s, a) => s + store.balances(a.id, today).now, 0);
+  const current = open.filter(a => accKind(a) === 'courant');
+  const savings = open.filter(a => accKind(a) === 'epargne');
+  const totalOf = list => list.reduce((s, a) => s + store.balances(a.id, today).now, 0);
+  const tCurrent = totalOf(current), tSavings = totalOf(savings);
+  const section = (title, list, total) => (list.length
+    ? `<h2 class="section-title">${title} <small>${money(total)}</small></h2><div class="list">${list.map(card).join('')}</div>` : '');
   // Le mois en cours en un coup d'œil, en montants nets comme dans les statistiques.
   const month = stats.inOut(stats.pick(open.map(a => a.id), `${today.slice(0, 8)}01`, today));
   const acc = defaultAccId();
@@ -158,8 +167,9 @@ function viewAccounts() {
         <span class="hero-hello">${new Date().getHours() < 18 ? 'Bonjour ☀️' : 'Bonsoir 🌙'}</span>
         <span class="hero-date">${dayFmt.format(new Date())}</span>
       </div>
-      <span class="hero-label">Total de vos comptes</span>
-      <span class="hero-total">${money(total)}</span>
+      <span class="hero-label">Comptes courants</span>
+      <span class="hero-total">${money(tCurrent)}</span>
+      <span class="hero-sub">🐷 Épargne : <b>${money(tSavings)}</b></span>
       <div class="hero-chips">
         <span class="hero-chip">💸 ${money(month.out)} dépensés ce mois-ci</span>
         <span class="hero-chip">💰 ${money(month.in)} reçus</span>
@@ -171,8 +181,8 @@ function viewAccounts() {
       <a class="quick-btn q-recur" href="#/recurrentes"><i aria-hidden="true">🔁</i>Récurrentes</a>
       <a class="quick-btn q-stats" href="#/statistiques"><i aria-hidden="true">📊</i>Stats</a>
     </nav>
-    <h2 class="section-title">🏦 Mes comptes <small>${plural(open.length, 'compte', 'comptes')}</small></h2>
-    <div class="list">${open.map(card).join('')}</div>
+    ${section('💳 Comptes courants', current, tCurrent)}
+    ${section('🐷 Épargne', savings, tSavings)}
     ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
     <a class="btn ghost block" href="#/nouveau-compte">＋ Nouveau compte</a>`;
 }
@@ -329,7 +339,7 @@ function viewEntryForm(id, accId) {
     <form id="f" class="form card" autocomplete="off" novalidate>
       ${e ? '' : `<div>
         <button type="button" class="btn photo block" id="photo-btn">📸 Photo du ticket</button>
-        <input type="file" id="photo" accept="image/*" hidden>
+        <input type="file" id="photo" accept="image/*" capture="environment" hidden>
         <div id="photo-report"></div>
       </div>`}
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
@@ -945,13 +955,17 @@ function viewAccountForm(id) {
     <form id="f" class="form card" autocomplete="off" novalidate>
       <label class="field"><span>Nom du compte</span><input name="name" required value="${esc(a?.name)}"></label>
       <label class="field"><span>Banque</span><input name="bank" value="${esc(a?.bank)}"></label>
+      <label class="field"><span>Type de compte</span><select name="kind">
+        <option value="courant" ${a && accKind(a) === 'courant' ? 'selected' : ''}>💳 Compte courant</option>
+        <option value="epargne" ${a && accKind(a) === 'epargne' ? 'selected' : ''}>🐷 Épargne</option>
+      </select></label>
       ${a ? `<label class="check"><input type="checkbox" name="closed" ${a.closed ? 'checked' : ''}> Compte clôturé (rangé à part dans la liste)</label>`
         : '<label class="field"><span>Solde initial <em>(facultatif, négatif si découvert)</em></span><input name="init" inputmode="decimal" placeholder="0,00"></label>'}
       <div class="actions">
         <button class="btn primary" type="submit">Enregistrer</button>
-        ${a && !n ? '<button class="btn danger" type="button" id="del">Supprimer</button>' : ''}
+        ${a ? `<button class="btn danger" type="button" id="del">${n ? `Supprimer avec ses ${plural(n, 'opération', 'opérations')}` : 'Supprimer'}</button>` : ''}
       </div>
-      ${a && n ? `<p class="hint">Ce compte contient ${plural(n, 'opération', 'opérations')} : il ne peut pas être supprimé. Cochez « clôturé » pour le ranger à part.</p>` : ''}
+      ${a && n ? '<p class="hint">Supprimer efface aussi ses opérations, y compris des statistiques. Pour seulement le ranger à part, cochez « clôturé ».</p>' : ''}
     </form>`;
   const f = $('#f');
   const F = f.elements;
@@ -966,7 +980,7 @@ function viewAccountForm(id) {
       if (F.init.value.trim().startsWith('-')) init = -init;
     }
     const maxPos = Math.max(-1, ...[...store.idx.acc.values()].map(x => x.pos));
-    const rec = { ...(a ?? { id: store.newId(), pos: maxPos + 1 }), name, bank: F.bank.value.trim() };
+    const rec = { ...(a ?? { id: store.newId(), pos: maxPos + 1 }), name, bank: F.bank.value.trim(), kind: F.kind.value };
     if (a) { if (F.closed.checked) rec.closed = true; else delete rec.closed; }
     await store.upsert('accounts', rec);
     if (init) {
@@ -976,9 +990,21 @@ function viewAccountForm(id) {
     if (a) goBack(`#/compte/${rec.id}`); else location.replace(`#/compte/${rec.id}`);
   });
   $('#del')?.addEventListener('click', async () => {
-    if (!confirm(`Supprimer le compte « ${a.name} » ?`)) return;
-    await store.remove('accounts', a.id);
-    toast('Compte supprimé');
+    const msg = n
+      ? `Supprimer le compte « ${a.name} » et ses ${plural(n, 'opération', 'opérations')} ?\n`
+        + 'Elles disparaîtront aussi des statistiques, et ses opérations récurrentes seront supprimées. C\'est irréversible.'
+      : `Supprimer le compte « ${a.name} » ?`;
+    if (!confirm(msg)) return;
+    // Ses opérations, ses récurrentes (avec l'autre moitié de ses virements récurrents), puis le compte lui-même.
+    const orders = recur.activeOrders();
+    const exists = new Set(orders.map(o => o.id));
+    const orderIds = new Set(orders.filter(o => o.acc === a.id).flatMap(o => [o.id, o.pair]).filter(oid => exists.has(oid)));
+    await store.upsertMany([
+      ...(store.idx.byAcc.get(a.id) ?? []).map(e => ['entries', { id: e.id, del: true }]),
+      ...[...orderIds].map(oid => ['orders', { id: oid, del: true }]),
+      ['accounts', { id: a.id, del: true }],
+    ]);
+    toast('🗑️ Compte supprimé');
     location.replace('#/');
   });
 }
