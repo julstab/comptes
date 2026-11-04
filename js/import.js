@@ -99,6 +99,7 @@ export function convertMaxiComptes(raw) {
     if (r.EntryType) o.mode = r.EntryType;
     if (r.EntryReference) o.ref = r.EntryReference;
     if (catSet.has(r.IdItem)) o.cat = idOf(r.IdItem);
+    if (r.EntryChecked) o.chk = true;
     if (r.IdOrder && orderSet.has(r.IdOrder)) o.pair = idOf(r.IdOrder);
     return o;
   });

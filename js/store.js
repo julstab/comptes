@@ -105,12 +105,19 @@ async function commit(kind) {
   emit(kind);
 }
 
-export async function upsert(coll, rec) {
+export const upsert = (coll, rec) => upsertMany([[coll, rec]]);
+
+// Plusieurs enregistrements en une seule écriture : items = [[collection, enregistrement], …].
+// Un enregistrement { id, del: true } est une suppression.
+export async function upsertMany(items) {
   data ??= emptyData();
-  rec.mod = new Date().toISOString();
-  const arr = data[coll];
-  const i = arr.findIndex(r => r.id === rec.id);
-  if (i >= 0) arr[i] = rec; else arr.push(rec);
+  const mod = new Date().toISOString();
+  for (const [coll, rec] of items) {
+    rec.mod = mod;
+    const arr = data[coll];
+    const i = arr.findIndex(r => r.id === rec.id);
+    if (i >= 0) arr[i] = rec; else arr.push(rec);
+  }
   await commit('local');
 }
 

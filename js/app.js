@@ -2,6 +2,7 @@
 import * as store from './store.js';
 import * as drive from './drive.js';
 import { convertBackup, parseBackupText } from './import.js';
+import * as recur from './recur.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -63,6 +64,9 @@ const routes = [
   [/^#\/nouveau-compte$/, () => viewAccountForm(null)],
   [/^#\/operation\/(\w+)$/, id => viewEntryForm(id, null)],
   [/^#\/nouvelle-operation\/(\w+)$/, acc => viewEntryForm(null, acc)],
+  [/^#\/recurrentes$/, () => viewOrders()],
+  [/^#\/recurrente\/(\w+)$/, id => viewOrderForm(id)],
+  [/^#\/nouvelle-recurrente$/, () => viewOrderForm(null)],
   [/^#\/reglages$/, () => viewSettings()],
 ];
 
@@ -90,7 +94,7 @@ $('#back').addEventListener('click', () => goBack());
 // Re-dessine l'écran courant (après une synchro) s'il ne contient pas de formulaire en cours.
 function refreshListView() {
   if (currentHash === '#/reglages') return renderDataCard();
-  if (/^#\/?$|^#\/compte\/\w+$/.test(currentHash)) {
+  if (/^#\/?$|^#\/compte\/\w+$|^#\/recurrentes$/.test(currentHash)) {
     scrollMem.set(currentHash, scrollY);
     render();
   }
@@ -124,9 +128,14 @@ function viewAccounts() {
   const open = accs.filter(a => !a.closed);
   const closed = accs.filter(a => a.closed);
   const total = open.reduce((s, a) => s + store.balances(a.id, today).now, 0);
+  const running = recur.activeOrders().filter(o => store.idx.acc.has(o.acc) && recur.nextDue(o)).length;
   view.innerHTML = `
     <section class="total"><span class="label">Total des comptes ouverts</span><span class="amt big ${negClass(total)}">${money(total)}</span></section>
     <div class="list">${open.map(card).join('')}</div>
+    <div class="list"><a class="acc" href="#/recurrentes">
+      <span class="acc-main"><span class="acc-name">Opérations récurrentes</span><span class="acc-bank">${plural(running, 'en cours', 'en cours')}</span></span>
+      <span class="acc-bal sub" aria-hidden="true">›</span>
+    </a></div>
     ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
     <a class="btn ghost block" href="#/nouveau-compte">+ Nouveau compte</a>`;
 }
@@ -370,6 +379,168 @@ function viewEntryForm(id, accId) {
   });
 }
 
+// ---------- Écrans : opérations récurrentes ----------
+const FREQS = [[1, 'Tous les mois'], [2, 'Tous les 2 mois'], [3, 'Tous les 3 mois'], [6, 'Tous les 6 mois'], [12, 'Tous les ans']];
+const fullDate = d => `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
+const rhythm = o => {
+  const f = o.freq || 1;
+  return `le ${o.day}${f === 1 ? ' de chaque mois' : f === 12 ? ', tous les ans' : `, tous les ${f} mois`}`;
+};
+
+function viewOrders() {
+  setHeader('Opérations récurrentes', true);
+  const orders = recur.activeOrders().filter(o => store.idx.acc.has(o.acc));
+  const byId = new Map(orders.map(o => [o.id, o]));
+  const next = new Map(orders.map(o => [o.id, recur.nextDue(o)]));
+  const thisYear = store.todayStr().slice(0, 4);
+  const row = o => {
+    const p = o.pair && byId.get(o.pair);
+    const meta = [rhythm(o), p && `virement avec ${store.idx.acc.get(p.acc)?.name}`, catLabel(o.cat), o.mode].filter(Boolean).map(esc).join(' · ');
+    const n = next.get(o.id);
+    return `<a class="acc" href="#/recurrente/${o.id}">
+      <span class="acc-main"><span class="acc-name">${esc(o.title || '(sans libellé)')}</span><span class="acc-bank">${meta}</span></span>
+      <span class="acc-bal"><span class="amt ${o.amt > 0 ? 'pos' : ''}">${signed(o.amt)}</span>
+        <span class="sub nowrap">${n ? `prochaine : ${n.slice(0, 4) === thisYear ? dayMonth(n) : fullDate(n)}` : `terminée${o.end ? ` le ${fullDate(o.end)}` : ''}`}</span></span>
+    </a>`;
+  };
+  const byAccount = list => [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos)
+    .map(a => {
+      const mine = list.filter(o => o.acc === a.id).sort((x, y) => x.day - y.day);
+      return mine.length ? `<h3 class="month nocap">${esc(a.name)}</h3>${mine.map(row).join('')}` : '';
+    }).join('');
+  const running = orders.filter(o => next.get(o.id));
+  const ended = orders.filter(o => !next.get(o.id));
+  view.innerHTML = `
+    <p class="hint">Le jour de l'échéance, l'opération est ajoutée au compte. Corrigez-la ensuite si la date ou le montant réel diffère.</p>
+    ${running.length ? `<div class="list">${byAccount(running)}</div>` : '<p class="empty">Aucune opération récurrente en cours.</p>'}
+    ${ended.length ? `<details class="closed"><summary>Terminées (${ended.length})</summary><div class="list">${byAccount(ended)}</div></details>` : ''}
+    <a class="fab" href="#/nouvelle-recurrente" aria-label="Nouvelle opération récurrente">${ICON_PLUS}</a>`;
+}
+
+function viewOrderForm(id) {
+  const byId = new Map(recur.activeOrders().map(o => [o.id, o]));
+  const o = id ? byId.get(id) : null;
+  if (id && !o) return location.replace('#/recurrentes');
+  const p = o?.pair ? byId.get(o.pair) : null;
+  const acc = o?.acc ?? [...store.idx.acc.values()].filter(a => !a.closed).sort((a, b) => a.pos - b.pos)[0]?.id;
+  if (!acc) return location.replace('#/');
+  setHeader(o ? 'Modifier la récurrente' : 'Nouvelle récurrente', true);
+  const type = o && o.amt > 0 ? 'R' : 'D';
+  const today = store.todayStr();
+  const next = o && recur.nextDue(o);
+
+  view.innerHTML = `
+    <form id="f" class="form card" autocomplete="off" novalidate>
+      <div class="seg" role="radiogroup" aria-label="Type d'opération">
+        <label><input type="radio" name="type" value="D" ${type === 'D' ? 'checked' : ''}><span>Dépense</span></label>
+        <label><input type="radio" name="type" value="R" ${type === 'R' ? 'checked' : ''}><span>Recette</span></label>
+      </div>
+      <label class="field"><span>Libellé</span><input name="title" required maxlength="120" value="${esc(o?.title)}"></label>
+      <label class="field"><span>Montant</span>
+        <input name="amt" inputmode="decimal" required value="${o ? amountInput(o.amt) : ''}" placeholder="0,00"></label>
+      <label class="field"><span>Compte</span><select name="acc">${accOptions(acc)}</select></label>
+      <label class="field"><span>Virement avec le compte <em>(facultatif : crée l'opération inverse sur ce compte)</em></span>
+        <select name="pair"><option value="">— Aucun —</option>${accOptions(p?.acc)}</select></label>
+      <div class="grid2">
+        <label class="field"><span>Jour du mois</span>
+          <input type="number" name="day" min="1" max="31" inputmode="numeric" required value="${o?.day ?? +today.slice(8, 10)}"></label>
+        <label class="field"><span>Fréquence</span><select name="freq">
+          ${FREQS.map(([n, label]) => `<option value="${n}" ${n === (o?.freq || 1) ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      </div>
+      <div class="grid2">
+        <label class="field"><span>Début</span><input type="date" name="start" required value="${o?.start ?? today}"></label>
+        <label class="field"><span>Fin <em>(facultatif)</em></span><input type="date" name="end" value="${o?.end ?? ''}"></label>
+      </div>
+      <div class="grid2">
+        <label class="field"><span>Mode</span><select name="mode">${modeOptions(o?.mode ?? '')}</select></label>
+        <label class="field"><span>Référence <em>(facultatif)</em></span><input name="ref" value="${esc(o?.ref)}"></label>
+      </div>
+      <label class="field"><span>Catégorie</span><select name="cat">${catOptions(type, o?.cat, true)}</select></label>
+      <label class="check"><input type="checkbox" name="chk" ${o?.chk ? 'checked' : ''}> Pointer automatiquement les opérations créées</label>
+      <p class="hint">${o ? (next ? `Prochaine échéance : ${fullDate(next)}.` : 'Terminée : plus aucune échéance à venir.')
+        : 'Les échéances déjà passées depuis la date de début seront créées à l\'enregistrement.'}
+        Les mois plus courts, l'échéance tombe le dernier jour du mois. Les opérations déjà créées ne sont pas modifiées.</p>
+      <div class="actions">
+        <button class="btn primary" type="submit">Enregistrer</button>
+        ${o ? '<button class="btn danger" type="button" id="del">Supprimer</button>' : ''}
+      </div>
+    </form>`;
+
+  const f = $('#f');
+  const F = f.elements;
+  const currentType = () => f.querySelector('input[name=type]:checked').value;
+  f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
+    F.cat.innerHTML = catOptions(currentType(), F.cat.value);
+  }));
+
+  f.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const title = F.title.value.trim();
+    const cents = parseAmount(F.amt.value);
+    const day = Number(F.day.value);
+    if (!title) { toast('Indiquez un libellé.'); return F.title.focus(); }
+    if (!(cents > 0)) { toast('Montant invalide.'); return F.amt.focus(); }
+    if (!Number.isInteger(day) || day < 1 || day > 31) { toast('Jour du mois invalide (1 à 31).'); return F.day.focus(); }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(F.start.value)) { toast('Date de début invalide.'); return F.start.focus(); }
+    if (F.end.value && F.end.value < F.start.value) { toast('La fin est avant le début.'); return F.end.focus(); }
+    if (F.pair.value && F.pair.value === F.acc.value) { toast('Le virement doit concerner un autre compte.'); return F.pair.focus(); }
+
+    // Champs communs aux deux moitiés d'un virement.
+    const common = r => {
+      r.title = title;
+      r.day = day;
+      r.freq = Number(F.freq.value);
+      r.start = F.start.value;
+      if (F.end.value) r.end = F.end.value; else delete r.end;
+      for (const k of ['mode', 'ref']) { const v = F[k].value.trim(); if (v) r[k] = v; else delete r[k]; }
+      if (F.chk.checked) r.chk = true; else delete r.chk;
+      return r;
+    };
+    const rec = common({ ...(o ?? { id: store.newId(), last: '' }) });
+    rec.acc = F.acc.value;
+    rec.amt = (currentType() === 'R' ? 1 : -1) * cents;
+    const cat = F.cat.value;
+    if (cat) rec.cat = cat; else delete rec.cat;
+
+    const items = [['orders', rec]];
+    if (F.pair.value) {
+      // L'autre moitié garde sa propre catégorie ; une nouvelle moitié reprend là où en est la récurrente.
+      const q = common({ ...(p ?? { id: store.newId(), last: o ? recur.lastDone(o) : '' }) });
+      q.acc = F.pair.value;
+      q.amt = -rec.amt;
+      q.pair = rec.id;
+      rec.pair = q.id;
+      items.push(['orders', q]);
+    } else {
+      delete rec.pair;
+      if (p) items.push(['orders', { id: p.id, del: true }]);
+    }
+    await store.upsertMany(items);
+    toast(o ? 'Récurrente modifiée' : 'Récurrente créée');
+    goBack('#/recurrentes');
+    runRecurrences();
+  });
+
+  $('#del')?.addEventListener('click', async () => {
+    if (!confirm(`Supprimer la récurrente « ${o.title} »${p ? ' et l\'opération inverse sur l\'autre compte' : ''} ?\nLes opérations déjà créées sont conservées.`)) return;
+    const items = [['orders', { id: o.id, del: true }]];
+    if (p) items.push(['orders', { id: p.id, del: true }]);
+    await store.upsertMany(items);
+    toast('Récurrente supprimée');
+    goBack('#/recurrentes');
+  });
+}
+
+// Création des échéances arrivées à date. Seulement sur des données à jour (synchro faite, ou pas de Drive) :
+// un appareil en retard pourrait sinon recréer une échéance déjà créée puis corrigée sur un autre.
+async function runRecurrences() {
+  if (drive.configured() && drive.status.state !== 'ok') return;
+  const n = await recur.generateDue();
+  if (!n) return;
+  toast(plural(n, 'opération récurrente ajoutée', 'opérations récurrentes ajoutées'));
+  refreshListView();
+}
+
 // ---------- Écran : création / modification d'un compte ----------
 function viewAccountForm(id) {
   const a = id ? store.idx.acc.get(id) : null;
@@ -575,14 +746,16 @@ async function start() {
     if (kind === 'remote' || kind === 'replace') refreshListView();
     updatePill();
   });
-  drive.onStatus(() => {
+  drive.onStatus(s => {
     updatePill();
     renderSyncCard();
     if (!store.idx.acc.size && /^#\/?$/.test(currentHash)) render();
+    if (s.state === 'ok') runRecurrences();
   });
   render();
   drive.init();
   updatePill();
+  if (!drive.configured()) runRecurrences();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
