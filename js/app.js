@@ -337,9 +337,18 @@ function accOptions(selected) {
     .map(a => `<option value="${a.id}" ${a.id === selected ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
 }
 
+// Catégorie de même nom dans l'autre sens (dépense ↔ recette) : les deux moitiés d'un virement s'annulent dans les statistiques.
+function twinCat(id) {
+  const c = id && store.idx.cat.get(id);
+  if (!c) return '';
+  const name = norm(catLabel(id));
+  return [...store.idx.cat.values()].find(x => x.type !== c.type && norm(catLabel(x.id)) === name)?.id ?? id;
+}
+
 function viewEntryForm(id, accId) {
   const e = id ? store.idx.entry.get(id) : null;
   if (id && !e) return location.replace('#/');
+  const p = e?.pair ? store.idx.entry.get(e.pair) : null; // autre moitié d'un virement
   const acc = e ? e.acc : accId;
   if (!store.idx.acc.has(acc)) return location.replace('#/');
   setHeader(e ? "Modifier l'opération" : 'Nouvelle opération', true);
@@ -370,6 +379,8 @@ function viewEntryForm(id, accId) {
       </div>
       <label class="field"><span>Catégorie</span><select name="cat">${catOptions(type, e?.cat, true)}</select></label>
       <label class="field"><span>Compte</span><select name="acc">${accOptions(acc)}</select></label>
+      <label class="field"><span>Virement avec le compte <em>(facultatif : crée l'opération inverse sur ce compte)</em></span>
+        <select name="pair"><option value="">— Aucun —</option>${accOptions(p?.acc)}</select></label>
       <label class="field"><span>Référence <em>(facultatif)</em></span><input name="ref" value="${esc(e?.ref)}"></label>
       <label class="check"><input type="checkbox" name="chk" ${e?.chk ? 'checked' : ''}> Opération pointée</label>
       <div class="actions">
@@ -387,6 +398,9 @@ function viewEntryForm(id, accId) {
   f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
     F.cat.innerHTML = catOptions(currentType(), F.cat.value);
   }));
+  F.pair.addEventListener('change', () => {
+    if (F.pair.value && [...F.mode.options].some(o => o.value === 'Virement')) F.mode.value = 'Virement';
+  });
 
   function applySuggestion(t) {
     const last = t.last;
@@ -491,6 +505,7 @@ function viewEntryForm(id, accId) {
     if (!title) { toast('Indiquez un libellé.'); return F.title.focus(); }
     if (!(cents > 0)) { toast('Montant invalide.'); return F.amt.focus(); }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(F.date.value)) { toast('Date invalide.'); return F.date.focus(); }
+    if (F.pair.value && F.pair.value === F.acc.value) { toast('Le virement doit concerner un autre compte.'); return F.pair.focus(); }
     const rec = { ...(e ?? { id: store.newId() }) };
     rec.acc = F.acc.value;
     rec.date = F.date.value;
@@ -501,15 +516,37 @@ function viewEntryForm(id, accId) {
       if (v) rec[k] = v; else delete rec[k];
     }
     if (F.chk.checked) rec.chk = true; else delete rec.chk;
-    await store.upsert('entries', rec);
+
+    const items = [['entries', rec]];
+    if (F.pair.value) {
+      // L'autre moitié reprend libellé, date, mode et référence ; elle garde sa catégorie et son pointage.
+      const q = { ...(p ?? { id: store.newId() }) };
+      if (!p) { const c = twinCat(rec.cat); if (c) q.cat = c; }
+      if (p && p.acc !== F.pair.value) delete q.chk; // passée sur un autre compte : à repointer
+      q.acc = F.pair.value;
+      q.date = rec.date;
+      q.amt = -rec.amt;
+      q.title = rec.title;
+      for (const k of ['mode', 'ref']) { if (rec[k]) q[k] = rec[k]; else delete q[k]; }
+      q.pair = rec.id;
+      rec.pair = q.id;
+      items.push(['entries', q]);
+    } else {
+      delete rec.pair;
+      if (p) items.push(['entries', { id: p.id, del: true }]);
+    }
+    await store.upsertMany(items);
     try { localStorage.setItem(LAST_ACC, rec.acc); } catch { /* stockage indisponible : sans importance */ }
-    toast(e ? '✏️ Opération modifiée' : '✅ Opération ajoutée');
+    toast(e ? '✏️ Opération modifiée' : F.pair.value ? '✅ Virement ajouté' : '✅ Opération ajoutée');
     goBack(`#/compte/${rec.acc}`);
   });
 
   $('#del')?.addEventListener('click', async () => {
-    if (!confirm(`Supprimer l'opération « ${e.title} » (${signed(e.amt)}) ?`)) return;
-    await store.remove('entries', e.id);
+    const other = p && store.idx.acc.get(p.acc)?.name;
+    if (!confirm(`Supprimer l'opération « ${e.title} » (${signed(e.amt)})${p ? ` et l'opération inverse sur ${other}` : ''} ?`)) return;
+    const items = [['entries', { id: e.id, del: true }]];
+    if (p) items.push(['entries', { id: p.id, del: true }]);
+    await store.upsertMany(items);
     toast('🗑️ Opération supprimée');
     goBack(`#/compte/${e.acc}`);
   });
