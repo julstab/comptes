@@ -3,7 +3,7 @@
 
 :root {
   --bg: #f4f5f7; --surface: #ffffff; --surface-2: #eceef2; --text: #14161a; --muted: #5f6673; --border: #e1e4e9;
-  --accent: #0f766e; --accent-ink: #ffffff; --accent-soft: #dcf3ef; --pos: #13804a; --neg: #c0362c;
+  --accent: #0f766e; --accent-ink: #ffffff; --accent-soft: #dcf3ef; --pos: #13804a; --neg: #c0362c; --warn: #b45309;
   --radius: 14px; --shadow: 0 1px 2px rgb(16 24 40 / .05), 0 1px 3px rgb(16 24 40 / .08);
   --top-h: 61px;
   /* Dégradés : boutons principaux, bouton photo, entête d'accueil. */
@@ -17,7 +17,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0e1013; --surface: #171a1f; --surface-2: #21252c; --text: #e7e9ed; --muted: #9aa1ac; --border: #2a2f37;
-    --accent: #2bb3a3; --accent-ink: #04201d; --accent-soft: #12302d; --pos: #4cc47f; --neg: #f2766b;
+    --accent: #2bb3a3; --accent-ink: #04201d; --accent-soft: #12302d; --pos: #4cc47f; --neg: #f2766b; --warn: #f0a24b;
     --shadow: none;
     --hero: linear-gradient(135deg, #115e59 0%, #155e75 50%, #4338ca 100%);
     --glow: rgb(0 0 0 / .5);
@@ -60,6 +60,7 @@ main { max-width: 760px; margin: 0 auto; padding: 16px 16px calc(96px + env(safe
 .amt { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .amt.neg { color: var(--neg); }
 .amt.pos { color: var(--pos); }
+.amt.warn, .sub.warn { color: var(--warn); font-weight: 600; }
 .amt.big { font-size: 28px; font-weight: 700; letter-spacing: -.01em; }
 .label { display: block; font-size: 13px; color: var(--muted); }
 .sub { display: block; font-size: 12.5px; color: var(--muted); }
@@ -185,6 +186,14 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
   margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
 }
 .summary .row2 .amt { font-weight: 600; }
+.month-end { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.month-end > summary { cursor: pointer; list-style: none; }
+.month-end > summary::-webkit-details-marker { display: none; }
+.month-end .amt { font-size: 20px; font-weight: 650; }
+.month-end ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.month-end li { display: flex; justify-content: space-between; gap: 12px; }
+.month-end li > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.month-end li .amt { font-size: inherit; font-weight: 600; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .toolbar input[type="search"] { flex: 1 1 220px; width: auto; }
 

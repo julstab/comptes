@@ -126,6 +126,19 @@ function defaultAccId() {
 const SAVINGS = /livret|epargne|assurance.?vie|\bpea\b|\bldds?\b|\blep\b|\bpel\b|\bcel\b|\bper\b|compte a terme/;
 const accKind = a => a.kind ?? (SAVINGS.test(norm(a.name)) ? 'epargne' : 'courant');
 
+// Solde prévu à la fin du mois : solde du jour + opérations déjà saisies pour la suite du mois
+// + échéances des récurrentes pas encore créées. warn : sous le seuil d'alerte du compte (0 par défaut).
+function monthEnd(a, today = store.todayStr()) {
+  const until = recur.endOfMonth(today);
+  const items = (store.idx.byAcc.get(a.id) ?? [])
+    .filter(e => e.date > today && e.date <= until)
+    .map(e => ({ date: e.date, title: e.title, amt: e.amt }))
+    .concat(recur.upcoming(a.id, until))
+    .sort((x, y) => x.date.localeCompare(y.date));
+  const total = store.balances(a.id, today).now + items.reduce((s, i) => s + i.amt, 0);
+  return { total, items, warn: total < (a.alert ?? 0) };
+}
+
 function viewAccounts() {
   setHeader('💰 Comptes', false);
   if (!store.idx.acc.size) {
@@ -143,21 +156,27 @@ function viewAccounts() {
   }
   const today = store.todayStr();
   const accs = [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos);
-  const card = a => {
-    const b = store.balances(a.id, today);
-    return `<a class="acc" href="#/compte/${a.id}">
-      ${bankLogo(a)}
-      <span class="acc-main"><span class="acc-name">${esc(a.name)}</span><span class="acc-bank">${esc(a.bank)}</span></span>
-      <span class="acc-bal"><span class="amt ${negClass(b.now)}">${money(b.now)}</span>
-        ${b.all !== b.now ? `<span class="sub">à venir : ${money(b.all)}</span>` : ''}</span>
-    </a>`;
-  };
   const open = accs.filter(a => !a.closed);
   const closed = accs.filter(a => a.closed);
   const current = open.filter(a => accKind(a) === 'courant');
   const savings = open.filter(a => accKind(a) === 'epargne');
+  const ends = new Map(current.map(a => [a.id, monthEnd(a, today)]));
+  const card = a => {
+    const b = store.balances(a.id, today);
+    const m = ends.get(a.id);
+    const sub = m && (m.total !== b.now || m.warn)
+      ? `<span class="sub ${m.warn ? 'warn' : ''}">${m.warn ? '⚠️ ' : ''}fin du mois : ${money(m.total)}</span>`
+      : b.all !== b.now ? `<span class="sub">à venir : ${money(b.all)}</span>` : '';
+    return `<a class="acc" href="#/compte/${a.id}">
+      ${bankLogo(a)}
+      <span class="acc-main"><span class="acc-name">${esc(a.name)}</span><span class="acc-bank">${esc(a.bank)}</span></span>
+      <span class="acc-bal"><span class="amt ${negClass(b.now)}">${money(b.now)}</span>${sub}</span>
+    </a>`;
+  };
   const totalOf = list => list.reduce((s, a) => s + store.balances(a.id, today).now, 0);
   const tCurrent = totalOf(current), tSavings = totalOf(savings);
+  const tEnd = [...ends.values()].reduce((s, m) => s + m.total, 0);
+  const warned = [...ends.values()].filter(m => m.warn).length;
   const section = (title, list, total) => (list.length
     ? `<h2 class="section-title">${title} <small>${money(total)}</small></h2><div class="list">${list.map(card).join('')}</div>` : '');
   // Le mois en cours en un coup d'œil, en montants nets comme dans les statistiques.
@@ -171,10 +190,12 @@ function viewAccounts() {
       </div>
       <span class="hero-label">Comptes courants</span>
       <span class="hero-total">${money(tCurrent)}</span>
+      ${current.length ? `<span class="hero-sub">📅 Fin du mois : <b>${money(tEnd)}</b></span>` : ''}
       <span class="hero-sub">🐷 Épargne : <b>${money(tSavings)}</b></span>
       <div class="hero-chips">
         <span class="hero-chip">💸 ${money(month.out)} dépensés ce mois-ci</span>
         <span class="hero-chip">💰 ${money(month.in)} reçus</span>
+        ${warned ? `<span class="hero-chip">⚠️ ${plural(warned, 'compte à surveiller', 'comptes à surveiller')}</span>` : ''}
       </div>
     </section>
     <nav class="quick" aria-label="Raccourcis">
@@ -235,7 +256,21 @@ function renderSummary(id) {
     <div class="row2">
       <div><span class="label">Solde pointé</span><span class="amt ${negClass(b.chk)}">${money(b.chk)}</span></div>
       <div><span class="label">Avec les opérations à venir</span><span class="amt ${negClass(b.all)}">${money(b.all)}</span></div>
-    </div>`;
+    </div>
+    ${accKind(a) === 'courant' ? monthEndHtml(a, monthEnd(a)) : ''}`;
+}
+
+// Solde prévu à la fin du mois, avec le détail de ce qui reste à passer.
+function monthEndHtml(a, m) {
+  const head = `<span class="label">📅 Fin du mois prévue</span>
+    <span class="amt ${m.warn ? 'warn' : negClass(m.total)}">${m.warn ? '⚠️ ' : ''}${money(m.total)}</span>`;
+  const why = !m.warn ? '' : a.alert ? `Sous le seuil d'alerte de ${money(a.alert)}. ` : 'Solde prévu négatif. ';
+  if (!m.items.length) return `<div class="month-end">${head}<span class="sub">${why}Rien d'autre de prévu ce mois-ci.</span></div>`;
+  return `<details class="month-end"><summary>${head}
+      <span class="sub">${why}${plural(m.items.length, 'opération à venir', 'opérations à venir')} : voir le détail</span></summary>
+    <ul>${m.items.map(i => `<li><span>${dayMonth(i.date)} · ${esc(i.title || '(sans libellé)')}</span>
+      <span class="amt ${i.amt > 0 ? 'pos' : ''}">${signed(i.amt)}</span></li>`).join('')}</ul>
+  </details>`;
 }
 
 function matches(e, q) {
@@ -1135,6 +1170,9 @@ function viewAccountForm(id) {
         <option value="courant" ${a && accKind(a) === 'courant' ? 'selected' : ''}>💳 Compte courant</option>
         <option value="epargne" ${a && accKind(a) === 'epargne' ? 'selected' : ''}>🐷 Épargne</option>
       </select></label>
+      <label class="field" id="alert-field" ${a && accKind(a) === 'epargne' ? 'hidden' : ''}>
+        <span>Seuil d'alerte <em>(⚠️ si le solde prévu en fin de mois passe dessous ; 0 si vide, négatif si découvert)</em></span>
+        <input name="alert" inputmode="decimal" placeholder="0,00" value="${a?.alert ? (a.alert < 0 ? '-' : '') + amountInput(a.alert) : ''}"></label>
       ${a ? `<label class="check"><input type="checkbox" name="closed" ${a.closed ? 'checked' : ''}> Compte clôturé (rangé à part dans la liste)</label>`
         : '<label class="field"><span>Solde initial <em>(facultatif, négatif si découvert)</em></span><input name="init" inputmode="decimal" placeholder="0,00"></label>'}
       <div class="actions">
@@ -1145,10 +1183,17 @@ function viewAccountForm(id) {
     </form>`;
   const f = $('#f');
   const F = f.elements;
+  F.kind.addEventListener('change', () => { $('#alert-field').hidden = F.kind.value !== 'courant'; });
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
     const name = F.name.value.trim();
     if (!name) { toast('Indiquez un nom.'); return F.name.focus(); }
+    let alertAmt = 0;
+    if (F.alert.value.trim()) {
+      alertAmt = parseAmount(F.alert.value);
+      if (Number.isNaN(alertAmt)) { toast("Seuil d'alerte invalide."); return F.alert.focus(); }
+      if (F.alert.value.trim().startsWith('-')) alertAmt = -alertAmt;
+    }
     let init = 0;
     if (!a && F.init.value.trim()) {
       init = parseAmount(F.init.value);
@@ -1158,6 +1203,7 @@ function viewAccountForm(id) {
     const maxPos = Math.max(-1, ...[...store.idx.acc.values()].map(x => x.pos));
     const rec = { ...(a ?? { id: store.newId(), pos: maxPos + 1 }), name, bank: F.bank.value.trim(), kind: F.kind.value };
     if (a) { if (F.closed.checked) rec.closed = true; else delete rec.closed; }
+    if (alertAmt) rec.alert = alertAmt; else delete rec.alert;
     await store.upsert('accounts', rec);
     if (init) {
       await store.upsert('entries', { id: store.newId(), acc: rec.id, date: store.todayStr(), amt: init, title: 'SOLDE INITIAL', init: true, chk: true });

@@ -38,6 +38,22 @@ export function nextDue(o) {
   return null;
 }
 
+export const endOfMonth = d => `${d.slice(0, 8)}${pad(daysIn(+d.slice(0, 4), +d.slice(5, 7)))}`;
+
+// Échéances du compte jusqu'à `until` dont l'opération n'est pas encore créée
+// (y compris celles déjà passées, si la création n'a pas encore eu lieu sur cet appareil).
+export function upcoming(accId, until) {
+  const out = [];
+  for (const o of activeOrders()) {
+    if (o.acc !== accId) continue;
+    const done = ym(lastDone(o));
+    for (const d of dueDates(o, until)) {
+      if (ym(d) > done && !store.idx.entry.has(o.id + d.slice(0, 7).replace('-', ''))) out.push({ date: d, title: o.title, amt: o.amt });
+    }
+  }
+  return out;
+}
+
 // Crée les opérations des échéances passées (date <= aujourd'hui) pas encore traitées.
 // L'identifiant de l'opération dépend de la récurrente et du mois : deux appareils qui créeraient
 // la même échéance produisent le même enregistrement, sans doublon après fusion.
