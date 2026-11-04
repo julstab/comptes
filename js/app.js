@@ -4,6 +4,7 @@ import * as drive from './drive.js';
 import { convertBackup, parseBackupText } from './import.js';
 import * as recur from './recur.js';
 import * as stats from './stats.js';
+import * as ticket from './ticket.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -52,6 +53,9 @@ function setHeader(title, back) {
 }
 
 const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+const ICON_CAMERA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, pour une photo reçue par « Partager »
+let pendingPhoto = null;
 
 // ---------- Navigation ----------
 let navDepth = 0;
@@ -65,6 +69,7 @@ const routes = [
   [/^#\/nouveau-compte$/, () => viewAccountForm(null)],
   [/^#\/operation\/(\w+)$/, id => viewEntryForm(id, null)],
   [/^#\/nouvelle-operation\/(\w+)$/, acc => viewEntryForm(null, acc)],
+  [/^#\/photo$/, () => viewSharedPhoto()],
   [/^#\/recurrentes$/, () => viewOrders()],
   [/^#\/recurrente\/(\w+)$/, id => viewOrderForm(id)],
   [/^#\/nouvelle-recurrente$/, () => viewOrderForm(null)],
@@ -294,6 +299,11 @@ function viewEntryForm(id, accId) {
 
   view.innerHTML = `
     <form id="f" class="form card" autocomplete="off" novalidate>
+      ${e ? '' : `<div>
+        <button type="button" class="btn ghost block" id="photo-btn">${ICON_CAMERA}Photo du ticket</button>
+        <input type="file" id="photo" accept="image/*" hidden>
+        <div id="photo-report"></div>
+      </div>`}
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
         <label><input type="radio" name="type" value="D" ${type === 'D' ? 'checked' : ''}><span>Dépense</span></label>
         <label><input type="radio" name="type" value="R" ${type === 'R' ? 'checked' : ''}><span>Recette</span></label>
@@ -355,6 +365,73 @@ function viewEntryForm(id, accId) {
   F.title.addEventListener('blur', () => setTimeout(() => (box.hidden = true), 150));
   F.title.addEventListener('keydown', ev => { if (ev.key === 'Escape') box.hidden = true; });
 
+  // Saisie par photo : Gemini lit le ticket, le formulaire est pré-rempli, l'utilisateur vérifie et enregistre.
+  const photoBtn = $('#photo-btn');
+  async function readPhoto(file) {
+    const report = $('#photo-report');
+    report.innerHTML = `<div class="report photo-report"><img src="${URL.createObjectURL(file)}" alt="Photo du ticket"><span>Lecture du ticket…</span></div>`;
+    const msg = report.querySelector('span');
+    photoBtn.disabled = true;
+    try {
+      msg.textContent = fillFromTicket(await ticket.readTicket(file, ticketContext()));
+    } catch (err) {
+      report.firstElementChild.classList.add('error');
+      msg.textContent = err.message;
+    } finally {
+      photoBtn.disabled = false;
+    }
+  }
+  function fillFromTicket(r) {
+    if (r.lisible === false) return "Ticket illisible : réessayez avec une photo plus nette.";
+    const known = r.libelle_connu && getTitleIndex().find(t => t.key === norm(r.libelle_connu));
+    if (known) {
+      applySuggestion(known);
+    } else {
+      if (r.commercant) F.title.value = String(r.commercant).slice(0, 120);
+      const cat = r.categorie && [...store.idx.cat.values()].find(c => norm(catLabel(c.id)) === norm(r.categorie));
+      if (cat) {
+        f.querySelector(`input[name=type][value=${cat.type}]`).checked = true;
+        F.cat.innerHTML = catOptions(cat.type, cat.id);
+      }
+    }
+    if (r.remboursement && currentType() !== 'R') {
+      f.querySelector('input[name=type][value=R]').checked = true;
+      F.cat.innerHTML = catOptions('R', F.cat.value, true);
+    }
+    if (r.mode && (store.data?.modes ?? []).includes(r.mode)) F.mode.innerHTML = modeOptions(r.mode);
+    const cents = Math.round(Math.abs(Number(r.montant) || 0) * 100);
+    if (cents > 0) F.amt.value = amountInput(cents);
+    if (typeof r.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.date)) {
+      const days = (Date.now() - new Date(`${r.date}T12:00`)) / 864e5;
+      if (days > -2 && days < 400) F.date.value = r.date;
+    }
+    const missing = [!(cents > 0) && 'le montant', !F.title.value.trim() && 'le libellé'].filter(Boolean);
+    return missing.length
+      ? `Rempli d'après la photo, sauf ${missing.join(' et ')} : complétez, puis Enregistrer.`
+      : "Rempli d'après la photo : vérifiez le montant et la date, puis Enregistrer.";
+  }
+  if (photoBtn) {
+    const input = $('#photo');
+    photoBtn.addEventListener('click', () => {
+      if (!ticket.getKey()) {
+        toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+        location.hash = '#/reglages';
+        return;
+      }
+      input.click();
+    });
+    input.addEventListener('change', () => {
+      const file = input.files[0];
+      input.value = '';
+      if (file) readPhoto(file);
+    });
+    if (pendingPhoto) {
+      const file = pendingPhoto;
+      pendingPhoto = null;
+      if (ticket.getKey()) readPhoto(file); else toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+    }
+  }
+
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
     const title = F.title.value.trim();
@@ -373,6 +450,7 @@ function viewEntryForm(id, accId) {
     }
     if (F.chk.checked) rec.chk = true; else delete rec.chk;
     await store.upsert('entries', rec);
+    try { localStorage.setItem(LAST_ACC, rec.acc); } catch { /* stockage indisponible : sans importance */ }
     toast(e ? 'Opération modifiée' : 'Opération ajoutée');
     goBack(`#/compte/${rec.acc}`);
   });
@@ -383,6 +461,36 @@ function viewEntryForm(id, accId) {
     toast('Opération supprimée');
     goBack(`#/compte/${e.acc}`);
   });
+}
+
+// Ce que Gemini doit connaître pour reprendre les habitudes de saisie : libellés récents, catégories, modes.
+function ticketContext() {
+  const titles = getTitleIndex().filter(t => t.last.amt < 0).slice(0, 150)
+    .map(t => `${t.title} | ${catLabel(t.last.cat) || '-'} | ${t.last.mode || '-'}`);
+  const categories = [...new Set([...store.idx.cat.values()].map(c => catLabel(c.id)))].sort((a, b) => a.localeCompare(b, 'fr'));
+  return { today: store.todayStr(), titles, categories, modes: store.data?.modes ?? store.DEFAULT_MODES };
+}
+
+// Photo reçue par le menu « Partager » d'Android (mise de côté par le service worker) : nouvelle opération pré-remplie.
+async function viewSharedPhoto() {
+  setHeader('Photo du ticket', true);
+  view.innerHTML = '<p class="empty">Ouverture de la photo…</p>';
+  let file = null;
+  try {
+    const cache = await caches.open('comptes-partage');
+    const res = await cache.match('photo');
+    if (res) {
+      file = new File([await res.blob()], 'ticket', { type: res.headers.get('Content-Type') || 'image/jpeg' });
+      await cache.delete('photo');
+    }
+  } catch { /* pas de photo en attente */ }
+  const accs = [...store.idx.acc.values()].filter(a => !a.closed).sort((a, b) => a.pos - b.pos);
+  let acc = null;
+  try { acc = localStorage.getItem(LAST_ACC); } catch { /* stockage indisponible */ }
+  if (!accs.some(a => a.id === acc)) acc = accs[0]?.id;
+  if (!file || !acc) return location.replace('#/');
+  pendingPhoto = file;
+  location.replace(`#/nouvelle-operation/${acc}`);
 }
 
 // ---------- Écrans : opérations récurrentes ----------
@@ -876,10 +984,38 @@ function renderDataCard() {
     <button class="btn ghost" data-action="export" ${store.data ? '' : 'disabled'}>Télécharger une copie (JSON)</button>`;
 }
 
+function renderTicketCard() {
+  const card = $('#ticket-card');
+  if (!card) return;
+  const key = ticket.getKey();
+  card.innerHTML = `
+    <h2>Lecture des tickets (Gemini)</h2>
+    <p class="muted">Pour remplir une opération à partir d'une photo de ticket ou d'une capture d'écran.
+      Créez une clé gratuite, sans carte bancaire, sur
+      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>
+      (« Create API key »), puis collez-la ici. Elle reste sur cet appareil ; la photo est envoyée à Google pour être lue.</p>
+    ${key
+      ? `<p>Clé enregistrée sur cet appareil (elle se termine par <code>${esc(key.slice(-4))}</code>).</p>
+        <button class="btn ghost" data-action="ticket-key-del">Supprimer la clé</button>`
+      : `<form id="key-form" class="stack" autocomplete="off">
+          <input name="key" type="password" placeholder="Clé API Gemini" aria-label="Clé API Gemini" autocomplete="off" spellcheck="false">
+          <button class="btn primary" type="submit">Enregistrer la clé</button>
+        </form>`}`;
+  $('#key-form')?.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const value = ev.target.elements.key.value.trim();
+    if (!value) return;
+    ticket.setKey(value);
+    toast('Clé enregistrée');
+    renderTicketCard();
+  });
+}
+
 function viewSettings() {
   setHeader('Réglages', true);
   view.innerHTML = `
     <section class="card" id="sync-card"></section>
+    <section class="card" id="ticket-card"></section>
     <section class="card">
       <h2>Importer une sauvegarde</h2>
       <p class="muted">Sauvegarde JSON de MaxiComptes, ou copie téléchargée depuis cette appli. <strong>Remplace toutes les données actuelles</strong>, ici et sur le Drive.</p>
@@ -888,6 +1024,7 @@ function viewSettings() {
     </section>
     <section class="card" id="data-card"></section>`;
   renderSyncCard();
+  renderTicketCard();
   renderDataCard();
 
   $('#imp').addEventListener('change', async ev => {
@@ -956,6 +1093,11 @@ const actions = {
     statsUi.tab = 'one';
     statsUi.cat = el.dataset.cat;
     location.hash = '#/statistiques';
+  },
+  'ticket-key-del'() {
+    if (!confirm('Supprimer la clé Gemini de cet appareil ?')) return;
+    ticket.setKey('');
+    renderTicketCard();
   },
   'drive-login': () => drive.signIn().catch(err => toast(err.message)),
   'drive-sync': () => drive.sync(),
