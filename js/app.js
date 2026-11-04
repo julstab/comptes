@@ -5,6 +5,7 @@ import { convertBackup, parseBackupText } from './import.js';
 import * as recur from './recur.js';
 import * as stats from './stats.js';
 import * as ticket from './ticket.js';
+import { bankLogo } from './banks.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -53,9 +54,9 @@ function setHeader(title, back) {
 }
 
 const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-const ICON_CAMERA = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>';
-const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, pour une photo reçue par « Partager »
-let pendingPhoto = null;
+const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
+let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
+let autoPhoto = false;   // raccourci « Ticket » de l'accueil : ouvre l'appareil photo dès l'ouverture du formulaire
 
 // ---------- Navigation ----------
 let navDepth = 0;
@@ -109,11 +110,22 @@ function refreshListView() {
 }
 
 // ---------- Écran : liste des comptes ----------
+const dayFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+
+// Compte proposé par défaut pour une nouvelle saisie : celui de la dernière saisie, sinon le premier compte ouvert.
+function defaultAccId() {
+  const accs = [...store.idx.acc.values()].filter(a => !a.closed).sort((a, b) => a.pos - b.pos);
+  let acc = null;
+  try { acc = localStorage.getItem(LAST_ACC); } catch { /* stockage indisponible */ }
+  return accs.some(a => a.id === acc) ? acc : accs[0]?.id;
+}
+
 function viewAccounts() {
-  setHeader('Comptes', false);
+  setHeader('💰 Comptes', false);
   if (!store.idx.acc.size) {
     view.innerHTML = `
       <section class="empty-state">
+        <div class="big-emoji" aria-hidden="true">👋</div>
         <h2>Aucun compte pour l'instant</h2>
         <p class="muted">Importez votre sauvegarde MaxiComptes pour retrouver vos comptes et vos opérations.</p>
         ${drive.configured() && drive.status.state === 'login'
@@ -128,6 +140,7 @@ function viewAccounts() {
   const card = a => {
     const b = store.balances(a.id, today);
     return `<a class="acc" href="#/compte/${a.id}">
+      ${bankLogo(a)}
       <span class="acc-main"><span class="acc-name">${esc(a.name)}</span><span class="acc-bank">${esc(a.bank)}</span></span>
       <span class="acc-bal"><span class="amt ${negClass(b.now)}">${money(b.now)}</span>
         ${b.all !== b.now ? `<span class="sub">à venir : ${money(b.all)}</span>` : ''}</span>
@@ -136,19 +149,32 @@ function viewAccounts() {
   const open = accs.filter(a => !a.closed);
   const closed = accs.filter(a => a.closed);
   const total = open.reduce((s, a) => s + store.balances(a.id, today).now, 0);
-  const running = recur.activeOrders().filter(o => store.idx.acc.has(o.acc) && recur.nextDue(o)).length;
+  // Le mois en cours en un coup d'œil, en montants nets comme dans les statistiques.
+  const month = stats.inOut(stats.pick(open.map(a => a.id), `${today.slice(0, 8)}01`, today));
+  const acc = defaultAccId();
   view.innerHTML = `
-    <section class="total"><span class="label">Total des comptes ouverts</span><span class="amt big ${negClass(total)}">${money(total)}</span></section>
+    <section class="hero">
+      <div class="hero-top">
+        <span class="hero-hello">${new Date().getHours() < 18 ? 'Bonjour ☀️' : 'Bonsoir 🌙'}</span>
+        <span class="hero-date">${dayFmt.format(new Date())}</span>
+      </div>
+      <span class="hero-label">Total de vos comptes</span>
+      <span class="hero-total">${money(total)}</span>
+      <div class="hero-chips">
+        <span class="hero-chip">💸 ${money(month.out)} dépensés ce mois-ci</span>
+        <span class="hero-chip">💰 ${money(month.in)} reçus</span>
+      </div>
+    </section>
+    <nav class="quick" aria-label="Raccourcis">
+      <a class="quick-btn q-add" href="#/nouvelle-operation/${acc}"><i aria-hidden="true">✏️</i>Saisir</a>
+      <a class="quick-btn q-photo" href="#/nouvelle-operation/${acc}" data-action="quick-photo"><i aria-hidden="true">📸</i>Ticket</a>
+      <a class="quick-btn q-recur" href="#/recurrentes"><i aria-hidden="true">🔁</i>Récurrentes</a>
+      <a class="quick-btn q-stats" href="#/statistiques"><i aria-hidden="true">📊</i>Stats</a>
+    </nav>
+    <h2 class="section-title">🏦 Mes comptes <small>${plural(open.length, 'compte', 'comptes')}</small></h2>
     <div class="list">${open.map(card).join('')}</div>
-    <div class="list"><a class="acc" href="#/recurrentes">
-      <span class="acc-main"><span class="acc-name">Opérations récurrentes</span><span class="acc-bank">${plural(running, 'en cours', 'en cours')}</span></span>
-      <span class="acc-bal sub" aria-hidden="true">›</span>
-    </a><a class="acc" href="#/statistiques">
-      <span class="acc-main"><span class="acc-name">Statistiques</span><span class="acc-bank">Par catégorie, par mois, soldes</span></span>
-      <span class="acc-bal sub" aria-hidden="true">›</span>
-    </a></div>
     ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
-    <a class="btn ghost block" href="#/nouveau-compte">+ Nouveau compte</a>`;
+    <a class="btn ghost block" href="#/nouveau-compte">＋ Nouveau compte</a>`;
 }
 
 // ---------- Écran : opérations d'un compte ----------
@@ -181,7 +207,9 @@ function viewAccount(id) {
 
 function renderSummary(id) {
   const b = store.balances(id);
+  const a = store.idx.acc.get(id);
   $('#summary').innerHTML = `
+    <div class="summary-head">${bankLogo(a, 32)}<span>${esc(a.bank || a.name)}</span></div>
     <span class="label">Solde aujourd'hui</span><span class="amt big ${negClass(b.now)}">${money(b.now)}</span>
     <div class="row2">
       <div><span class="label">Solde pointé</span><span class="amt ${negClass(b.chk)}">${money(b.chk)}</span></div>
@@ -234,7 +262,7 @@ function renderOps(id) {
   $('#ops').innerHTML = rows.length
     ? `<div class="list">${html}</div>${rows.length > shown.length
       ? `<button type="button" class="btn ghost block" data-action="more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`
-    : `<p class="empty">${q || ui.unchk ? 'Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`;
+    : `<p class="empty">${ui.unchk && !q ? '🎉 Tout est pointé !' : q ? '🔍 Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`;
 }
 
 // ---------- Écran : saisie / modification d'une opération ----------
@@ -300,7 +328,7 @@ function viewEntryForm(id, accId) {
   view.innerHTML = `
     <form id="f" class="form card" autocomplete="off" novalidate>
       ${e ? '' : `<div>
-        <button type="button" class="btn ghost block" id="photo-btn">${ICON_CAMERA}Photo du ticket</button>
+        <button type="button" class="btn photo block" id="photo-btn">📸 Photo du ticket</button>
         <input type="file" id="photo" accept="image/*" hidden>
         <div id="photo-report"></div>
       </div>`}
@@ -429,6 +457,9 @@ function viewEntryForm(id, accId) {
       const file = pendingPhoto;
       pendingPhoto = null;
       if (ticket.getKey()) readPhoto(file); else toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+    } else if (autoPhoto) {
+      autoPhoto = false;
+      photoBtn.click();
     }
   }
 
@@ -451,14 +482,14 @@ function viewEntryForm(id, accId) {
     if (F.chk.checked) rec.chk = true; else delete rec.chk;
     await store.upsert('entries', rec);
     try { localStorage.setItem(LAST_ACC, rec.acc); } catch { /* stockage indisponible : sans importance */ }
-    toast(e ? 'Opération modifiée' : 'Opération ajoutée');
+    toast(e ? '✏️ Opération modifiée' : '✅ Opération ajoutée');
     goBack(`#/compte/${rec.acc}`);
   });
 
   $('#del')?.addEventListener('click', async () => {
     if (!confirm(`Supprimer l'opération « ${e.title} » (${signed(e.amt)}) ?`)) return;
     await store.remove('entries', e.id);
-    toast('Opération supprimée');
+    toast('🗑️ Opération supprimée');
     goBack(`#/compte/${e.acc}`);
   });
 }
@@ -484,10 +515,7 @@ async function viewSharedPhoto() {
       await cache.delete('photo');
     }
   } catch { /* pas de photo en attente */ }
-  const accs = [...store.idx.acc.values()].filter(a => !a.closed).sort((a, b) => a.pos - b.pos);
-  let acc = null;
-  try { acc = localStorage.getItem(LAST_ACC); } catch { /* stockage indisponible */ }
-  if (!accs.some(a => a.id === acc)) acc = accs[0]?.id;
+  const acc = defaultAccId();
   if (!file || !acc) return location.replace('#/');
   pendingPhoto = file;
   location.replace(`#/nouvelle-operation/${acc}`);
@@ -630,7 +658,7 @@ function viewOrderForm(id) {
       if (p) items.push(['orders', { id: p.id, del: true }]);
     }
     await store.upsertMany(items);
-    toast(o ? 'Récurrente modifiée' : 'Récurrente créée');
+    toast(o ? '✏️ Récurrente modifiée' : '✅ Récurrente créée');
     goBack('#/recurrentes');
     runRecurrences();
   });
@@ -640,7 +668,7 @@ function viewOrderForm(id) {
     const items = [['orders', { id: o.id, del: true }]];
     if (p) items.push(['orders', { id: p.id, del: true }]);
     await store.upsertMany(items);
-    toast('Récurrente supprimée');
+    toast('🗑️ Récurrente supprimée');
     goBack('#/recurrentes');
   });
 }
@@ -651,19 +679,30 @@ async function runRecurrences() {
   if (drive.configured() && drive.status.state !== 'ok') return;
   const n = await recur.generateDue();
   if (!n) return;
-  toast(plural(n, 'opération récurrente ajoutée', 'opérations récurrentes ajoutées'));
+  toast(`🔁 ${plural(n, 'opération récurrente ajoutée', 'opérations récurrentes ajoutées')}`);
   refreshListView();
 }
 
 // ---------- Écran : statistiques ----------
 const statsUi = { tab: 'cat', period: {}, acc: '', cat: '' };
-const STATS_TABS = [['cat', 'Catégories'], ['mois', 'Par mois'], ['one', 'Une catégorie'], ['soldes', 'Soldes']];
+const STATS_TABS = [['cat', '🏷️ Catégories'], ['mois', '📅 Par mois'], ['one', '🔎 Une catégorie'], ['soldes', '📈 Soldes']];
 const DEFAULT_PERIOD = { cat: 'm12', mois: 'm12', one: 'm36', soldes: 'all' };
 const NO_CAT = 'sans'; // « sans catégorie » dans l'adresse
 const shortMonth = new Intl.DateTimeFormat('fr-FR', { month: 'short' });
 const pct = (v, total) => (total ? `${Math.round(v * 100 / total)} %` : '');
 const catName = k => (k ? store.idx.cat.get(k)?.name ?? '?' : 'Sans catégorie');
 const sum = arr => arr.reduce((s, v) => s + v, 0);
+// Une émoticône par grande catégorie, d'après son nom (l'ordre compte : « Prêt auto » est un prêt, pas une voiture).
+const CAT_EMOJI = [
+  [/pret|banque|frais bancaires/, '🏦'], [/aliment|courses/, '🛒'], [/restaurant|bar/, '🍽️'], [/maison/, '🏠'], [/deco/, '🛋️'],
+  [/sante/, '🩺'], [/vetement|chaussure/, '👕'], [/voyage|vacance/, '✈️'], [/enfant/, '🧸'], [/ecole/, '🎓'], [/sport/, '⚽'],
+  [/loisir/, '🎬'], [/cadeau/, '🎁'], [/esthetique/, '💅'], [/telephon/, '📱'], [/impot/, '🧾'], [/parking/, '🅿️'],
+  [/peugeot|audi|seat|tesla|voiture|auto|carbur/, '🚗'], [/assurance/, '🛡️'], [/revenu|salaire/, '💼'], [/allocation/, '👨‍👩‍👧'],
+  [/interet/, '📈'], [/vente/, '🏷️'], [/rembours/, '↩️'], [/odr/, '🎟️'], [/economie|epargne|livret/, '🐷'],
+  [/approvisionnement|virement/, '🔄'], [/retrait|especes/, '💵'], [/crypto/, '🪙'], [/invest/, '📊'], [/carte/, '💳'], [/divers/, '📦'],
+];
+const catEmoji = name => CAT_EMOJI.find(([re]) => re.test(norm(name)))?.[1] ?? '🏷️';
+const catTitle = k => `${catEmoji(catName(k))} ${catName(k)}`;
 let statsArgs = null;
 
 function firstEntryDate() {
@@ -728,7 +767,7 @@ function viewStats(drill) {
   const key = drill === NO_CAT ? '' : drill;
   if (key && !store.idx.cat.has(key)) return location.replace('#/statistiques');
   const tab = drill == null ? statsUi.tab : 'cat';
-  setHeader(drill == null ? 'Statistiques' : catName(key), true);
+  setHeader(drill == null ? 'Statistiques' : catTitle(key), true);
   view.innerHTML = `
     ${drill == null ? `<div class="toolbar">${STATS_TABS.map(([id, label]) => `
       <button type="button" class="chip ${tab === id ? 'on' : ''}" data-action="stats-tab" data-tab="${id}" aria-pressed="${tab === id}">${label}</button>`).join('')}</div>` : ''}
@@ -773,7 +812,7 @@ function statsCategories(body, p, accIds, scope, reps) {
   const net = [...stats.sumBy(entries, e => stats.groupKey(e.cat))];
   const row = ([k, v]) => {
     const id = reps.get(k) ?? '';
-    return { key: k, mag: Math.abs(v), cls: v < 0 ? 'out' : 'in', name: catName(id), text: money(Math.abs(v)), href: `#/statistiques/categorie/${id || NO_CAT}` };
+    return { key: k, mag: Math.abs(v), cls: v < 0 ? 'out' : 'in', name: catTitle(id), text: money(Math.abs(v)), href: `#/statistiques/categorie/${id || NO_CAT}` };
   };
   const outs = net.filter(([, v]) => v < 0).map(row).sort((a, b) => b.mag - a.mag);
   const ins = net.filter(([, v]) => v > 0).map(row).sort((a, b) => b.mag - a.mag);
@@ -933,7 +972,7 @@ function viewAccountForm(id) {
     if (init) {
       await store.upsert('entries', { id: store.newId(), acc: rec.id, date: store.todayStr(), amt: init, title: 'SOLDE INITIAL', init: true, chk: true });
     }
-    toast(a ? 'Compte modifié' : 'Compte créé');
+    toast(a ? '✏️ Compte modifié' : '🎉 Compte créé');
     if (a) goBack(`#/compte/${rec.id}`); else location.replace(`#/compte/${rec.id}`);
   });
   $('#del')?.addEventListener('click', async () => {
@@ -960,7 +999,7 @@ function renderSyncCard() {
   const s = store.syncState;
   const st = drive.status;
   card.innerHTML = `
-    <h2>Synchronisation Google Drive</h2>
+    <h2>☁️ Synchronisation Google Drive</h2>
     ${drive.configured() ? `
       <p>État : <strong>${esc(SYNC_TEXT[st.state] ?? st.state)}</strong>${st.message && st.state === 'error' ? ` — ${esc(st.message)}` : ''}</p>
       <p class="muted">Dernière synchronisation : ${s.lastSync ? dateTime(s.lastSync) : 'jamais'}${store.isDirty() ? ' · des modifications attendent d\'être envoyées' : ''}</p>
@@ -979,7 +1018,7 @@ function renderDataCard() {
     ? `${plural(store.idx.acc.size, 'compte', 'comptes')} · ${plural(store.idx.entry.size, 'opération', 'opérations')} · ${plural(store.idx.cat.size, 'catégorie', 'catégories')} · ${plural(store.data.orders.filter(o => !o.del).length, 'opération récurrente', 'opérations récurrentes')}`
     : 'Aucune donnée.';
   card.innerHTML = `
-    <h2>Données et copie de sauvegarde</h2>
+    <h2>💾 Données et copie de sauvegarde</h2>
     <p class="muted">${counts}</p>
     <button class="btn ghost" data-action="export" ${store.data ? '' : 'disabled'}>Télécharger une copie (JSON)</button>`;
 }
@@ -989,7 +1028,7 @@ function renderTicketCard() {
   if (!card) return;
   const key = ticket.getKey();
   card.innerHTML = `
-    <h2>Lecture des tickets (Gemini)</h2>
+    <h2>📸 Lecture des tickets (Gemini)</h2>
     <p class="muted">Pour remplir une opération à partir d'une photo de ticket ou d'une capture d'écran.
       Créez une clé gratuite, sans carte bancaire, sur
       <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>
@@ -1017,7 +1056,7 @@ function viewSettings() {
     <section class="card" id="sync-card"></section>
     <section class="card" id="ticket-card"></section>
     <section class="card">
-      <h2>Importer une sauvegarde</h2>
+      <h2>📥 Importer une sauvegarde</h2>
       <p class="muted">Sauvegarde JSON de MaxiComptes, ou copie téléchargée depuis cette appli. <strong>Remplace toutes les données actuelles</strong>, ici et sur le Drive.</p>
       <input type="file" id="imp" accept=".json,application/json" aria-label="Fichier de sauvegarde">
       <div id="imp-report"></div>
@@ -1093,6 +1132,10 @@ const actions = {
     statsUi.tab = 'one';
     statsUi.cat = el.dataset.cat;
     location.hash = '#/statistiques';
+  },
+  'quick-photo'() {
+    autoPhoto = true;
+    location.hash = `#/nouvelle-operation/${defaultAccId()}`;
   },
   'ticket-key-del'() {
     if (!confirm('Supprimer la clé Gemini de cet appareil ?')) return;
