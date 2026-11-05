@@ -272,6 +272,14 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
 .btn svg { width: 20px; height: 20px; flex: none; }
 .photo-report { display: flex; align-items: center; gap: 12px; }
 
+/* Saisie par phrase */
+.say { display: flex; gap: 8px; margin-top: 10px; }
+.say input { flex: 1; min-width: 0; }
+.say .btn { flex: none; width: 46px; padding: 0; font-size: 19px; }
+.say .btn.on { background: var(--neg); color: #fff; animation: listen .9s ease-in-out infinite alternate; }
+@keyframes listen { to { box-shadow: 0 0 0 6px color-mix(in srgb, var(--neg) 28%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .say .btn.on { animation: none; } }
+
 /* Pointage par capture */
 .stmt-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); cursor: pointer; }
 .stmt-row:first-child { border-top: 0; }

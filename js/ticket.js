@@ -1,4 +1,4 @@
-// Lecture d'un ticket (photo ou capture d'écran) par l'API Gemini, offre gratuite.
+// Lecture d'un ticket (photo ou capture d'écran) ou d'une phrase par l'API Gemini, offre gratuite.
 // La clé API est propre à chaque appareil : elle reste dans le navigateur, jamais dans le code ni sur le Drive.
 const KEY_STORE = 'comptes.geminiKey';
 const MODEL = 'gemini-3.5-flash-lite';
@@ -94,7 +94,7 @@ async function call(body, key) {
 function parse(response) {
   const parts = response?.candidates?.[0]?.content?.parts ?? [];
   const text = parts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim();
-  if (!text) throw new Error("Gemini n'a rien renvoyé pour cette image.");
+  if (!text) throw new Error("Gemini n'a rien renvoyé.");
   try {
     return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
   } catch {
@@ -102,15 +102,16 @@ function parse(response) {
   }
 }
 
-// Envoie une image et une consigne à Gemini, renvoie l'objet JSON décrit par le schéma.
+// Envoie une consigne à Gemini, précédée d'une image s'il y en a une, et renvoie l'objet JSON décrit par le schéma.
 async function ask(file, text, schema, maxSide) {
   const key = getKey();
   if (!key) throw new Error('Ajoutez votre clé Gemini dans les Réglages.');
-  const image = await shrink(file, maxSide);
-  const contents = [{
-    role: 'user',
-    parts: [{ inlineData: { mimeType: image.type || 'image/jpeg', data: await toBase64(image) } }, { text }],
-  }];
+  const parts = [{ text }];
+  if (file) {
+    const image = await shrink(file, maxSide);
+    parts.unshift({ inlineData: { mimeType: image.type || 'image/jpeg', data: await toBase64(image) } });
+  }
+  const contents = [{ role: 'user', parts }];
   let response;
   try {
     response = await call({ contents, generationConfig: { responseMimeType: 'application/json', responseJsonSchema: schema } }, key);
@@ -124,6 +125,54 @@ async function ask(file, text, schema, maxSide) {
 
 // Lit un ticket et renvoie les champs du schéma. context : { today, titles, categories, modes } (listes de textes).
 export const readTicket = (file, context) => ask(file, prompt(context), SCHEMA, 1600);
+
+// ---------- Phrase tapée ou dictée (« 12 € boulangerie hier ») ----------
+const SENTENCE_SCHEMA = {
+  type: 'object',
+  properties: {
+    comprise: { type: 'boolean' },
+    libelle_connu: { type: ['string', 'null'] },
+    libelle: { type: ['string', 'null'] },
+    montant: { type: ['number', 'null'] },
+    sens: { type: ['string', 'null'] },
+    date: { type: ['string', 'null'] },
+    compte: { type: ['string', 'null'] },
+    virement_avec: { type: ['string', 'null'] },
+    categorie: { type: ['string', 'null'] },
+    mode: { type: ['string', 'null'] },
+  },
+  required: ['comprise', 'libelle_connu', 'libelle', 'montant', 'sens', 'date', 'compte', 'virement_avec', 'categorie', 'mode'],
+};
+
+function sentencePrompt(text, { today, todayLong, titles, accounts, categories, modes }) {
+  return `Tu transformes une phrase, tapée ou dictée (donc parfois mal transcrite), en une opération à saisir dans mes comptes bancaires.
+Nous sommes le ${todayLong} (${today}).
+Phrase : « ${text} »
+
+Réponds uniquement par un objet JSON avec ces champs :
+- comprise : false si la phrase ne décrit pas une dépense, une recette ou un virement, sinon true.
+- libelle_connu : si l'opération correspond à l'un de mes libellés habituels ci-dessous (même commerçant, même organisme, même objet, même dit autrement, abrégé ou mal transcrit), recopie ce libellé exactement ; sinon null. En cas d'hésitation entre plusieurs, prends le premier de la liste (le plus récent).
+- libelle : si libelle_connu est null, un libellé court écrit simplement (« la boulangerie Paul » devient « Boulangerie Paul ») ; sinon null.
+- montant : le montant en euros, nombre positif avec un point décimal (« 12 euros 50 » = 12.5). null s'il n'est pas dit.
+- sens : "recette" pour de l'argent reçu (salaire, remboursement, virement reçu), "depense" pour de l'argent payé ou envoyé ; null si la phrase ne le dit pas.
+- date : au format AAAA-MM-JJ. « hier », « lundi », « le 3 » : la date passée la plus récente, sauf si la phrase parle d'une opération à venir. null si la phrase ne dit pas de date.
+- compte : si la phrase cite un de mes comptes (par son nom, sa banque ou sa carte), recopie exactement son nom depuis la liste des comptes ; sinon null.
+- virement_avec : pour un virement entre deux de mes comptes, recopie exactement le nom du compte qui reçoit l'argent ; compte est alors celui d'où il part et sens vaut "depense". Sinon null.
+- categorie : si libelle_connu est null, la catégorie la plus probable, recopiée exactement depuis la liste des catégories ; sinon null.
+- mode : seulement si la phrase dit le moyen de paiement (« carte », « chèque », « espèces », « prélèvement »…), recopié exactement parmi : ${modes.join(', ')}. Sinon null.
+
+Mes libellés habituels, du plus récent au plus ancien (libellé | sens | catégorie | compte) :
+${titles.join('\n')}
+
+Mes comptes :
+${accounts.join('\n')}
+
+Catégories :
+${categories.join('\n')}`;
+}
+
+// Lit une phrase. context : { today, todayLong, titles, accounts, categories, modes } (listes de textes).
+export const readSentence = (text, context) => ask(null, sentencePrompt(text, context), SENTENCE_SCHEMA);
 
 // ---------- Capture d'écran de l'appli de la banque (pointage) ----------
 const STATEMENT_SCHEMA = {

@@ -380,6 +380,9 @@ function twinCat(id) {
   return [...store.idx.cat.values()].find(x => x.type !== c.type && norm(catLabel(x.id)) === name)?.id ?? id;
 }
 
+// Reconnaissance vocale du navigateur (Chrome) : absente ailleurs, le 🎤 n'est alors pas affiché.
+const Speech = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+
 function viewEntryForm(id, accId) {
   const e = id ? store.idx.entry.get(id) : null;
   if (id && !e) return location.replace('#/');
@@ -395,6 +398,11 @@ function viewEntryForm(id, accId) {
       ${e ? '' : `<div>
         <button type="button" class="btn photo block" id="photo-btn">📸 Photo du ticket</button>
         <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+        <div class="say">
+          <input id="say" placeholder="Ex. : 12 € pain hier" enterkeyhint="go" aria-label="Décrire l'opération en une phrase">
+          ${Speech ? '<button type="button" class="btn ghost" id="mic" aria-label="Dicter l\'opération" aria-pressed="false">🎤</button>' : ''}
+          <button type="button" class="btn ghost" id="say-go" aria-label="Remplir d'après la phrase">➜</button>
+        </div>
         <div id="photo-report"></div>
       </div>`}
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
@@ -533,6 +541,115 @@ function viewEntryForm(id, accId) {
     }
   }
 
+  // Saisie par phrase, tapée ou dictée : Gemini la lit et reconnaît le libellé habituel,
+  // puis l'historique de ce libellé complète le reste (catégorie, mode, compte, montant non dit).
+  const say = $('#say');
+  const keyOrSettings = () => {
+    if (ticket.getKey()) return true;
+    toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+    location.hash = '#/reglages';
+    return false;
+  };
+  async function readSentence() {
+    const text = say.value.trim();
+    if (!text) return say.focus();
+    if (!keyOrSettings()) return;
+    const report = $('#photo-report');
+    report.innerHTML = '<div class="report"><span>Lecture de la phrase…</span></div>';
+    const msg = report.querySelector('span');
+    $('#say-go').disabled = true;
+    try {
+      msg.textContent = fillFromSentence(await ticket.readSentence(text, sentenceContext()));
+    } catch (err) {
+      report.firstElementChild.classList.add('error');
+      msg.textContent = err.message;
+    } finally {
+      $('#say-go').disabled = false;
+    }
+  }
+  function fillFromSentence(r) {
+    if (r.comprise === false) return 'Phrase non comprise : dites au moins le montant et ce qui a été payé ou reçu.';
+    // La phrase décrit toute l'opération : on repart d'un formulaire vierge (utile quand on redicte).
+    f.querySelector('input[name=type][value=D]').checked = true;
+    F.title.value = F.amt.value = F.pair.value = '';
+    F.amt.placeholder = '0,00';
+    F.date.value = store.todayStr();
+    F.mode.innerHTML = modeOptions(defaultMode);
+    F.cat.innerHTML = catOptions('D', '');
+    F.acc.value = acc;
+    const known = r.libelle_connu && getTitleIndex().find(t => t.key === norm(r.libelle_connu));
+    const said = r.sens === 'recette' ? 'R' : r.sens === 'depense' ? 'D' : null;
+    let cents = Math.round(Math.abs(Number(r.montant) || 0) * 100);
+    const fromLast = !(cents > 0) && !!known;
+    if (fromLast) cents = Math.abs(known.last.amt);
+    if (cents > 0) F.amt.value = amountInput(cents);
+    if (known) {
+      applySuggestion(known);
+    } else {
+      if (r.libelle) F.title.value = String(r.libelle).slice(0, 120);
+      const ty = said ?? 'D';
+      const cats = r.categorie ? [...store.idx.cat.values()].filter(c => norm(catLabel(c.id)) === norm(r.categorie)) : [];
+      const cat = cats.find(c => c.type === ty) ?? cats[0];
+      f.querySelector(`input[name=type][value=${cat?.type ?? ty}]`).checked = true;
+      F.cat.innerHTML = catOptions(cat?.type ?? ty, cat?.id ?? '');
+    }
+    if (said && said !== currentType()) {
+      f.querySelector(`input[name=type][value=${said}]`).checked = true;
+      F.cat.innerHTML = catOptions(said, twinCat(F.cat.value), true);
+    }
+    if (r.mode && (store.data?.modes ?? []).includes(r.mode)) F.mode.innerHTML = modeOptions(r.mode);
+    const open = id => (id && store.idx.acc.has(id) && !store.idx.acc.get(id).closed ? id : null);
+    const named = n => (n ? [...store.idx.acc.values()].find(a => !a.closed && norm(a.name) === norm(n))?.id ?? null : null);
+    const where = named(r.compte) ?? open(known?.last.acc);
+    if (where) F.acc.value = where;
+    const other = named(r.virement_avec) ?? open(known?.last.pair && store.idx.entry.get(known.last.pair)?.acc);
+    F.pair.value = other && other !== F.acc.value ? other : '';
+    F.pair.dispatchEvent(new Event('change'));
+    if (typeof r.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.date)) {
+      const days = (Date.now() - new Date(`${r.date}T12:00`)) / 864e5;
+      if (Math.abs(days) < 400) F.date.value = r.date;
+    }
+    const missing = [!(cents > 0) && 'le montant', !F.title.value.trim() && 'le libellé'].filter(Boolean);
+    return missing.length ? `Rempli d'après la phrase, sauf ${missing.join(' et ')} : complétez, puis Enregistrer.`
+      : fromLast ? "Rempli d'après la phrase, avec le montant de la dernière fois : vérifiez, puis Enregistrer."
+        : "Rempli d'après la phrase : vérifiez, puis Enregistrer.";
+  }
+  if (say) {
+    say.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); readSentence(); }
+    });
+    $('#say-go').addEventListener('click', readSentence);
+    const mic = $('#mic');
+    let listening = null;
+    mic?.addEventListener('click', () => {
+      if (listening) return listening.stop();
+      if (!keyOrSettings()) return;
+      const rec = new Speech();
+      rec.lang = 'fr-FR';
+      rec.interimResults = true;
+      let heard = '', failed = false;
+      rec.onresult = ev => { heard = [...ev.results].map(x => x[0].transcript).join(''); say.value = heard; };
+      rec.onerror = ev => {
+        failed = true;
+        if (ev.error === 'aborted') return;
+        toast(ev.error === 'not-allowed' || ev.error === 'service-not-allowed' ? 'Micro refusé : autorisez-le pour ce site dans Chrome.'
+          : ev.error === 'no-speech' ? 'Rien entendu : réessayez.'
+            : ev.error === 'network' ? 'Dictée impossible sans connexion.' : `Dictée impossible (${ev.error}).`);
+      };
+      rec.onend = () => {
+        listening = null;
+        mic.classList.remove('on');
+        mic.setAttribute('aria-pressed', 'false');
+        if (!failed && heard.trim() && say.isConnected) readSentence();
+      };
+      try { rec.start(); } catch { return toast('Dictée impossible.'); }
+      listening = rec;
+      say.value = '';
+      mic.classList.add('on');
+      mic.setAttribute('aria-pressed', 'true');
+    });
+  }
+
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
     const title = F.title.value.trim();
@@ -593,6 +710,17 @@ function ticketContext() {
     .map(t => `${t.title} | ${catLabel(t.last.cat) || '-'} | ${t.last.mode || '-'}`);
   const categories = [...new Set([...store.idx.cat.values()].map(c => catLabel(c.id)))].sort((a, b) => a.localeCompare(b, 'fr'));
   return { today: store.todayStr(), titles, categories, modes: store.data?.modes ?? store.DEFAULT_MODES };
+}
+
+// Pour une phrase : libellés récents dépenses ET recettes, avec leur compte, et la liste des comptes ouverts.
+function sentenceContext() {
+  const ctx = ticketContext();
+  const accName = id => store.idx.acc.get(id)?.name ?? '-';
+  ctx.titles = getTitleIndex().slice(0, 200)
+    .map(t => `${t.title} | ${t.last.amt > 0 ? 'recette' : 'dépense'} | ${catLabel(t.last.cat) || '-'} | ${accName(t.last.acc)}`);
+  ctx.accounts = [...store.idx.acc.values()].filter(a => !a.closed).sort((a, b) => a.pos - b.pos).map(a => a.name);
+  ctx.todayLong = new Date(`${ctx.today}T12:00`).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  return ctx;
 }
 
 // Photo reçue par le menu « Partager » d'Android (mise de côté par le service worker) : nouvelle opération pré-remplie.
