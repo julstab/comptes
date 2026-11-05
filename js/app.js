@@ -161,19 +161,16 @@ function viewAccounts() {
   const current = open.filter(a => accKind(a) === 'courant');
   const savings = open.filter(a => accKind(a) === 'epargne');
   const ends = new Map(current.map(a => [a.id, monthEnd(a, today)]));
+  // Sur l'accueil, chaque compte affiche son solde pointé : celui de la banque.
   const card = a => {
-    const b = store.balances(a.id, today);
-    const m = ends.get(a.id);
-    const sub = m && (m.total !== b.now || m.warn)
-      ? `<span class="sub ${m.warn ? 'warn' : ''}">${m.warn ? '⚠️ ' : ''}fin du mois : ${money(m.total)}</span>`
-      : b.all !== b.now ? `<span class="sub">à venir : ${money(b.all)}</span>` : '';
+    const { chk } = store.balances(a.id, today);
     return `<a class="acc" href="#/compte/${a.id}">
       ${bankLogo(a)}
       <span class="acc-main"><span class="acc-name">${esc(a.name)}</span><span class="acc-bank">${esc(a.bank)}</span></span>
-      <span class="acc-bal"><span class="amt ${negClass(b.now)}">${money(b.now)}</span>${sub}</span>
+      <span class="acc-bal"><span class="amt ${negClass(chk)}">${money(chk)}</span></span>
     </a>`;
   };
-  const totalOf = list => list.reduce((s, a) => s + store.balances(a.id, today).now, 0);
+  const totalOf = list => list.reduce((s, a) => s + store.balances(a.id, today).chk, 0);
   const tCurrent = totalOf(current), tSavings = totalOf(savings);
   const tEnd = [...ends.values()].reduce((s, m) => s + m.total, 0);
   const warned = [...ends.values()].filter(m => m.warn).length;
@@ -252,9 +249,8 @@ function renderSummary(id) {
   const a = store.idx.acc.get(id);
   $('#summary').innerHTML = `
     <div class="summary-head">${bankLogo(a, 32)}<span>${esc(a.bank || a.name)}</span></div>
-    <span class="label">Solde aujourd'hui</span><span class="amt big ${negClass(b.now)}">${money(b.now)}</span>
+    <span class="label">Solde pointé</span><span class="amt big ${negClass(b.chk)}">${money(b.chk)}</span>
     <div class="row2">
-      <div><span class="label">Solde pointé</span><span class="amt ${negClass(b.chk)}">${money(b.chk)}</span></div>
       <div><span class="label">Avec les opérations à venir</span><span class="amt ${negClass(b.all)}">${money(b.all)}</span></div>
     </div>
     ${accKind(a) === 'courant' ? monthEndHtml(a, monthEnd(a)) : ''}`;
