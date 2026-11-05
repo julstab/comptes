@@ -68,6 +68,9 @@ const ICONS = {
   open: icon('<circle cx="12" cy="12" r="7.5" stroke-dasharray="3.2 2.6"/>'),
   home: icon('<path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/>'),
   image: icon('<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M20 15.5l-4.5-4.5L7 19"/>'),
+  select: icon('<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12l2.5 2.5 4.5-5"/>'),
+  trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 12.5h9l1-12.5"/>'),
+  close: icon('<path d="M6 6l12 12M18 6L6 18"/>'),
   gear: icon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
 };
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
@@ -75,6 +78,7 @@ let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouvertur
 let autoPhoto = false;   // « Ticket » de l'accueil ou 📷 d'un compte (true) : ouvre l'appareil photo dès l'ouverture du formulaire ; 🖼️ d'un compte ('pick') : le choix d'une image
 let pendingSentence = null; // phrase saisie sur la page d'un compte, lue dès l'ouverture du formulaire
 let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
+let opSel = null; // sélection de plusieurs opérations d'un compte : { acc, ids (Set), shown (identifiants affichés) }, oubliée en changeant d'écran
 
 // ---------- Navigation ----------
 let navDepth = 0;
@@ -102,6 +106,7 @@ function render() {
   const hash = location.hash || '#/';
   const route = routes.find(([re]) => re.test(hash));
   if (!route) return location.replace('#/');
+  document.body.classList.remove('picking'); // choix de catégorie laissé ouvert en quittant le formulaire
   // Sur PC, l'accueil, la page d'un compte et les statistiques prennent toute la largeur ; le reste garde une colonne.
   view.classList.toggle('wide', /^#\/?$|^#\/compte\/\w+$|^#\/statistiques/.test(hash));
   route[1](...hash.match(route[0]).slice(1));
@@ -118,6 +123,7 @@ window.addEventListener('hashchange', () => {
   scrollMem.set(currentHash, scrollY);
   currentHash = location.hash || '#/';
   navDepth++;
+  opSel = null;
   render();
 });
 $('#back').addEventListener('click', () => goBack());
@@ -288,6 +294,7 @@ function viewAccount(id) {
           <input type="search" id="q" placeholder="Rechercher : libellé, catégorie, montant…" value="${esc(ui.q)}" aria-label="Rechercher">
           <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">${ICONS.open}Non pointées</button>
           <button type="button" class="chip" data-action="statement">${ICONS.scan}Pointer avec une capture</button>
+          <button type="button" class="chip ${opSel?.acc === id ? 'on' : ''}" data-action="select" aria-pressed="${opSel?.acc === id}">${ICONS.select}Sélectionner</button>
         </div>
         <input type="file" id="stmt" accept="image/*" multiple hidden>
         <div id="ops"></div>
@@ -367,6 +374,8 @@ function renderOps(id) {
   rows = rows.slice().reverse();
   const shown = rows.slice(0, ui.limit);
   const today = store.todayStr();
+  // Mode sélection : toucher une ligne la coche au lieu de l'ouvrir, le pointage est masqué.
+  const sel = opSel?.acc === id ? opSel.ids : null;
 
   let html = '';
   let month = '';
@@ -374,19 +383,43 @@ function renderOps(id) {
     const m = e.date.slice(0, 7);
     if (m !== month) { month = m; html += `<h3 class="month">${monthLabel(e.date)}</h3>`; }
     const meta = [dayMonth(e.date), catLabel(e.cat), e.mode].filter(Boolean).map(esc).join(' · ');
-    html += `<div class="op ${e.date > today ? 'future' : ''}" data-id="${e.id}">
+    const main = `<span class="op-title">${esc(e.title || '(sans libellé)')}</span>
+        <span class="op-meta">${e.date > today ? '<span class="tag">À venir</span> · ' : ''}${meta}</span>`;
+    const amt = `<span class="op-amt"><span class="amt ${e.amt > 0 ? 'pos' : ''}">${signed(e.amt)}</span><span class="sub">${money(running.get(e.id))}</span></span>`;
+    html += sel
+      ? `<div class="op selectable ${e.date > today ? 'future' : ''} ${sel.has(e.id) ? 'picked' : ''}" data-id="${e.id}" data-action="sel"
+          role="checkbox" aria-checked="${sel.has(e.id)}" tabindex="0">
+      <span class="selbox" aria-hidden="true"></span>
+      <span class="op-main">${main}</span>
+      ${amt}
+    </div>`
+      : `<div class="op ${e.date > today ? 'future' : ''}" data-id="${e.id}">
       <button type="button" class="chk ${e.chk ? 'on' : ''}" data-action="chk" aria-pressed="${!!e.chk}" aria-label="${e.chk ? 'Dépointer' : 'Pointer'}"></button>
-      <a class="op-main" href="#/operation/${e.id}">
-        <span class="op-title">${esc(e.title || '(sans libellé)')}</span>
-        <span class="op-meta">${e.date > today ? '<span class="tag">À venir</span> · ' : ''}${meta}</span>
-      </a>
-      <span class="op-amt"><span class="amt ${e.amt > 0 ? 'pos' : ''}">${signed(e.amt)}</span><span class="sub">${money(running.get(e.id))}</span></span>
+      <a class="op-main" href="#/operation/${e.id}">${main}</a>
+      ${amt}
     </div>`;
   }
-  $('#ops').innerHTML = rows.length
+  $('#ops').innerHTML = (rows.length
     ? `<div class="list">${html}</div>${rows.length > shown.length
       ? `<button type="button" class="btn ghost block" data-action="more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`
-    : `<p class="empty">${ui.unchk && !q ? '🎉 Tout est pointé !' : q ? '🔍 Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`;
+    : `<p class="empty">${ui.unchk && !q ? '🎉 Tout est pointé !' : q ? '🔍 Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`)
+    + (sel ? '<div class="sel-actions" id="sel-actions"></div>' : '');
+  $('.fab.new-op').hidden = !!sel;
+  if (sel) {
+    opSel.shown = shown.map(e => e.id);
+    renderSelBar();
+  }
+}
+
+// Barre du bas en mode sélection : nombre d'opérations cochées, tout cocher, supprimer, quitter.
+function renderSelBar() {
+  const n = opSel.ids.size;
+  const all = opSel.shown.length > 0 && opSel.shown.every(id => opSel.ids.has(id));
+  $('#sel-actions').innerHTML = `
+    <button type="button" class="icon-btn" data-action="select" aria-label="Quitter la sélection" title="Quitter la sélection">${ICONS.close}</button>
+    <span class="sel-count" role="status">${n.toLocaleString('fr-FR')}<span class="sel-word"> ${n > 1 ? 'sélectionnées' : 'sélectionnée'}</span></span>
+    <button type="button" class="btn ghost" data-action="sel-all" ${opSel.shown.length ? '' : 'disabled'}>${all ? 'Aucune' : 'Tout'}</button>
+    <button type="button" class="btn danger" data-action="sel-delete" ${n ? '' : 'disabled'}>${ICONS.trash}Supprimer</button>`;
 }
 
 // ---------- Écran : saisie / modification d'une opération ----------
@@ -424,6 +457,102 @@ function catOptions(type, selected, keepOther = false) {
   cats.sort((a, b) => (a.type === b.type ? a.pos - b.pos : a.type === type ? -1 : 1));
   return '<option value="">— Sans catégorie —</option>'
     + cats.map(c => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(catLabel(c.id))}</option>`).join('');
+}
+
+// Catégorie : un champ où quelques lettres filtrent la liste (« boul », « alim »), au lieu d'une longue liste déroulante.
+// Le <select> caché reste la valeur du formulaire, rempli comme avant par catOptions ; le champ affiche son choix.
+function catField(options) {
+  return `<div class="field cat-field">
+        <label for="f-cat">Catégorie</label>
+        <input id="f-cat" placeholder="Sans catégorie" role="combobox" aria-autocomplete="list" aria-expanded="false"
+          aria-controls="cat-list" autocomplete="off" enterkeyhint="done">
+        <div class="sugg cat-list" id="cat-list" role="listbox" aria-label="Catégories" hidden></div>
+        <select name="cat" hidden>${options}</select>
+      </div>`;
+}
+
+const coarsePointer = matchMedia('(pointer: coarse)');
+function wireCatField(sel) {
+  const input = $('#f-cat'), list = $('#cat-list');
+  let items = [], active = -1;
+  const show = () => { input.value = sel.value ? sel.selectedOptions[0]?.text ?? '' : ''; };
+  new MutationObserver(show).observe(sel, { childList: true }); // type changé, suggestion, lecture par Gemini…
+  show();
+
+  function fill(q) {
+    const words = norm(q).split(/\s+/).filter(Boolean);
+    // Les catégories dont un mot commence par ce qui est tapé d'abord (« tel » : Téléphonie avant Hotels).
+    const rank = o => (words.every(w => norm(o.text).split(/[^a-z0-9]+/).some(p => p.startsWith(w))) ? 0 : 1);
+    items = [...sel.options].filter(o => words.every(w => norm(o.text).includes(w))).sort((a, b) => rank(a) - rank(b));
+    active = words.length ? 0 : items.findIndex(o => o.value === sel.value);
+    list.innerHTML = items.length
+      ? items.map((o, i) => `<button type="button" role="option" id="cat-o${i}" data-i="${i}" tabindex="-1"
+          aria-selected="${o.value === sel.value}">${esc(o.text)}</button>`).join('')
+      : '<p class="cat-none">Aucune catégorie ne correspond.</p>';
+    list.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    highlight();
+  }
+  function highlight() {
+    list.querySelectorAll('.active').forEach(b => b.classList.remove('active'));
+    const b = active >= 0 && $(`#cat-o${active}`);
+    if (b) {
+      b.classList.add('active');
+      input.setAttribute('aria-activedescendant', b.id);
+      if (b.offsetTop < list.scrollTop || b.offsetTop + b.offsetHeight > list.scrollTop + list.clientHeight) {
+        list.scrollTop = b.offsetTop - (list.clientHeight - b.offsetHeight) / 2;
+      }
+    } else input.removeAttribute('aria-activedescendant');
+  }
+  function close() {
+    document.body.classList.remove('picking');
+    list.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    if (!input.value.trim()) sel.value = ''; // champ vidé : sans catégorie
+    show(); // texte tapé sans choisir : on revient à la catégorie en place
+  }
+  function pick(o) {
+    sel.value = o.value;
+    close();
+    if (coarsePointer.matches) input.blur(); // referme le clavier du téléphone
+  }
+
+  input.addEventListener('focus', () => {
+    input.select();
+    fill('');
+    // Téléphone : le champ remonte en haut de l'écran pour laisser la place à la liste au-dessus du clavier
+    // (avec de l'espace ajouté sous le formulaire le temps du choix, sinon la page est trop courte pour remonter).
+    if (coarsePointer.matches) {
+      document.body.classList.add('picking');
+      setTimeout(() => input.closest('.field').scrollIntoView({ block: 'start', behavior: 'smooth' }), 300);
+    }
+  });
+  input.addEventListener('input', () => fill(input.value));
+  input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== input) close(); }, 150));
+  input.addEventListener('keydown', ev => {
+    if (list.hidden) {
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); fill(''); }
+      return;
+    }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      if (items.length) active = (active + (ev.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+      highlight();
+    } else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      const o = items[active] ?? items[0];
+      if (o) pick(o);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      close();
+    }
+  });
+  list.addEventListener('mousedown', ev => ev.preventDefault()); // le champ garde le focus
+  list.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-i]');
+    if (b) pick(items[+b.dataset.i]);
+  });
 }
 
 function modeOptions(selected) {
@@ -547,7 +676,7 @@ function viewEntryForm(id, accId) {
         <label class="field"><span>Date</span><input type="date" name="date" required value="${e?.date ?? store.todayStr()}"></label>
         <label class="field"><span>Mode</span><select name="mode">${modeOptions(e ? e.mode : defaultMode)}</select></label>
       </div>
-      <label class="field"><span>Catégorie</span><select name="cat">${catOptions(type, e?.cat, true)}</select></label>
+      ${catField(catOptions(type, e?.cat, true))}
       <label class="field"><span>Compte</span><select name="acc">${accOptions(acc)}</select></label>
       <label class="field"><span>Virement avec le compte <em>(facultatif : crée l'opération inverse sur ce compte)</em></span>
         <select name="pair"><option value="">— Aucun —</option>${accOptions(p?.acc)}</select></label>
@@ -568,6 +697,7 @@ function viewEntryForm(id, accId) {
   f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
     F.cat.innerHTML = catOptions(currentType(), F.cat.value);
   }));
+  wireCatField(F.cat);
   F.pair.addEventListener('change', () => {
     if (F.pair.value && [...F.mode.options].some(o => o.value === 'Virement')) F.mode.value = 'Virement';
   });
@@ -1044,7 +1174,7 @@ function viewOrderForm(id) {
         <label class="field"><span>Mode</span><select name="mode">${modeOptions(o?.mode ?? '')}</select></label>
         <label class="field"><span>Référence <em>(facultatif)</em></span><input name="ref" value="${esc(o?.ref)}"></label>
       </div>
-      <label class="field"><span>Catégorie</span><select name="cat">${catOptions(type, o?.cat, true)}</select></label>
+      ${catField(catOptions(type, o?.cat, true))}
       <label class="check"><input type="checkbox" name="chk" ${o?.chk ? 'checked' : ''}> Pointer automatiquement les opérations créées</label>
       <p class="hint">${o ? (next ? `Prochaine échéance : ${fullDate(next)}.` : 'Terminée : plus aucune échéance à venir.')
         : 'Les échéances déjà passées depuis la date de début seront créées à l\'enregistrement.'}
@@ -1061,6 +1191,7 @@ function viewOrderForm(id) {
   f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
     F.cat.innerHTML = catOptions(currentType(), F.cat.value);
   }));
+  wireCatField(F.cat);
 
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
@@ -1598,6 +1729,44 @@ const actions = {
     acctUi[currentAccId].limit += 200;
     renderOps(currentAccId);
   },
+  select() {
+    opSel = opSel ? null : { acc: currentAccId, ids: new Set(), shown: [] };
+    const chip = $('.chip[data-action="select"]');
+    chip.classList.toggle('on', !!opSel);
+    chip.setAttribute('aria-pressed', String(!!opSel));
+    renderOps(currentAccId);
+  },
+  sel(el) {
+    const id = el.dataset.id;
+    const on = !opSel.ids.has(id);
+    if (on) opSel.ids.add(id); else opSel.ids.delete(id);
+    el.classList.toggle('picked', on);
+    el.setAttribute('aria-checked', String(on));
+    renderSelBar();
+  },
+  // « Tout » coche les opérations affichées (celles de la recherche ou du filtre en cours) ; « Aucune » les décoche.
+  'sel-all'() {
+    const all = opSel.shown.every(id => opSel.ids.has(id));
+    for (const id of opSel.shown) { if (all) opSel.ids.delete(id); else opSel.ids.add(id); }
+    renderOps(currentAccId);
+  },
+  async 'sel-delete'() {
+    const list = [...opSel.ids].map(id => store.idx.entry.get(id)).filter(Boolean);
+    if (!list.length) return;
+    // Comme pour une seule opération : l'autre moitié d'un virement est supprimée avec elle.
+    const ids = new Set(list.map(e => e.id));
+    let pairs = 0;
+    for (const e of list) {
+      if (e.pair && store.idx.entry.has(e.pair) && !ids.has(e.pair)) { ids.add(e.pair); pairs++; }
+    }
+    const total = list.reduce((s, e) => s + e.amt, 0);
+    if (!confirm(`Supprimer ${plural(list.length, 'opération', 'opérations')} (total ${signed(total)}) ?`
+      + (pairs ? `\n${plural(pairs, 'virement', 'virements')} : l'opération inverse sur l'autre compte sera supprimée aussi.` : ''))) return;
+    await store.upsertMany([...ids].map(id => ['entries', { id, del: true }]));
+    opSel = null;
+    toast(`🗑️ ${plural(list.length, 'opération supprimée', 'opérations supprimées')}`);
+    viewAccount(currentAccId);
+  },
   'stats-tab'(el) {
     statsUi.tab = el.dataset.tab;
     viewStats(null);
@@ -1635,6 +1804,13 @@ view.addEventListener('click', ev => {
   if (!el || !actions[el.dataset.action]) return;
   ev.preventDefault();
   actions[el.dataset.action](el, ev);
+});
+// Au clavier, Espace ou Entrée coche la ligne d'opération qui a le focus.
+view.addEventListener('keydown', ev => {
+  if ((ev.key === ' ' || ev.key === 'Enter') && ev.target.matches('.op[data-action="sel"]')) {
+    ev.preventDefault();
+    actions.sel(ev.target);
+  }
 });
 
 // ---------- Pastille de synchronisation ----------

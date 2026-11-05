@@ -240,6 +240,28 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
 }
 .chk:focus-visible { outline: 2px solid var(--accent); border-radius: 50%; }
 
+/* Sélection de plusieurs opérations : case carrée à la place du pointage, barre d'actions collée en bas. */
+.op.selectable { cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+.op.selectable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.op.picked, .op.picked:hover { background: var(--accent-soft); }
+.selbox { position: relative; width: 44px; height: 44px; flex: none; }
+.selbox::before {
+  content: ""; position: absolute; inset: 11px; border-radius: 6px; border: 2px solid var(--muted); background: var(--surface);
+}
+.op.picked .selbox::before { background: var(--accent); border-color: var(--accent); }
+.op.picked .selbox::after {
+  content: ""; position: absolute; left: 17px; top: 18px; width: 10px; height: 6px;
+  border: solid var(--accent-ink); border-width: 0 0 2px 2px; transform: rotate(-45deg);
+}
+.sel-actions {
+  position: sticky; bottom: max(12px, env(safe-area-inset-bottom)); z-index: 4; display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / .22);
+}
+.sel-count { flex: 1; min-width: 0; font-size: 14.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sel-actions .btn { min-height: 42px; padding: 0 14px; }
+.sel-actions .btn svg { width: 18px; height: 18px; }
+
 .fab {
   position: fixed; z-index: 5; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
   width: 58px; height: 58px; border-radius: 20px; display: grid; place-items: center;
@@ -275,6 +297,14 @@ details.closed > summary { cursor: pointer; color: var(--muted); padding: 8px 4p
 .sugg button:first-child { border-top: 0; }
 .sugg button:hover, .sugg button:focus-visible { background: var(--surface-2); outline: none; }
 .sugg small { color: var(--muted); white-space: nowrap; font-size: 12.5px; }
+/* Catégorie : liste filtrée sous le champ, qui défile seule. */
+.cat-field { scroll-margin-top: calc(var(--top-h) + 8px); }
+body.picking main { padding-bottom: 80vh; }
+.cat-list { max-height: min(320px, 45vh); overflow-y: auto; overscroll-behavior: contain; }
+.cat-list button { padding-block: 10px; }
+.cat-list button.active { background: var(--surface-2); }
+.cat-list button[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+.cat-none { margin: 0; padding: 12px; color: var(--muted); font-size: 14px; }
 
 .report { margin-top: 12px; padding: 12px; border-radius: 10px; background: var(--accent-soft); font-size: 14px; }
 .btn svg { width: 20px; height: 20px; flex: none; }
@@ -441,4 +471,6 @@ a.rank-row:hover .rank-name { text-decoration: underline; }
   .ai-btn { width: 38px; height: 38px; }
   .grid2 { grid-template-columns: 1fr; }
   .amt.big { font-size: 24px; }
+  .sel-word { display: none; } /* barre de sélection : le nombre seul, comme dans les applis Android */
+  .sel-count { font-size: 17px; }
 }
