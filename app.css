@@ -377,7 +377,68 @@ a.rank-row:hover .rank-name { text-decoration: underline; }
 .viz-table th { font-weight: 600; color: var(--muted); }
 .viz-table th:first-child, .viz-table td:first-child { text-align: left; white-space: normal; }
 
+/* ---------- PC : barre latérale à gauche, pages en colonnes ---------- */
+.side { display: none; }
+@media (min-width: 1000px) {
+  body { display: grid; grid-template-columns: 296px minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .side {
+    grid-column: 1; grid-row: 1 / span 2; align-self: start; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    scrollbar-width: thin; display: flex; flex-direction: column; gap: 2px; padding: 14px 12px 24px;
+    background: var(--surface); border-right: 1px solid var(--border);
+  }
+  .top { grid-column: 2; min-height: var(--top-h); padding-inline: 24px; }
+  /* La barre latérale remplace les réglages de l'en-tête, les raccourcis de l'accueil et le ＋ d'un compte. */
+  .top a[href="#/reglages"], .quick, .fab.new-op { display: none; }
+  main { grid-column: 2; width: 100%; max-width: 880px; margin: 0; padding: 24px 32px 48px; }
+  main.wide { max-width: 1400px; }
+  /* ＋ des récurrentes : en bas à droite du contenu plutôt que dans le coin de l'écran. */
+  .fab { position: sticky; bottom: 24px; margin: 16px 0 0 auto; }
+
+  .side-brand { padding: 6px 10px 14px; color: inherit; font-size: 18px; font-weight: 700; text-decoration: none; }
+  .side > .btn { margin: 0 2px 12px; }
+  .side-nav { display: grid; gap: 2px; }
+  .side-nav a {
+    display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 10px;
+    color: var(--text); text-decoration: none; font-size: 15px; font-weight: 500;
+  }
+  .side-nav svg { width: 20px; height: 20px; flex: none; color: var(--muted); }
+  .side-nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .side-nav a.on svg { color: var(--accent); }
+  .side-h {
+    display: flex; justify-content: space-between; gap: 8px; margin: 18px 10px 4px;
+    font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+  }
+  .side-h .amt { text-transform: none; letter-spacing: 0; }
+  .side-acc {
+    display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 10px;
+    color: inherit; text-decoration: none; font-size: 14px;
+  }
+  .side-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-acc .amt { font-size: 13.5px; font-weight: 600; }
+  .side-acc.on { background: var(--accent-soft); }
+  .side-acc.on .side-name { font-weight: 600; }
+  .side-nav a:not(.on):hover, .side-acc:not(.on):hover, .op:hover, .stmt-row:hover { background: var(--surface-2); }
+
+  .hero { padding: 22px 26px; }
+  .hero-total { font-size: 40px; }
+  .hero-side { gap: 8px; }
+  .hero-side span { font-size: 13px; }
+  .hero-side b { font-size: 18px; }
+  .hero-foot { font-size: 14px; }
+
+  /* Saisie : les champs deux par deux (libellé | montant, date et mode | catégorie…). */
+  .form.cols2 { grid-template-columns: 1fr 1fr; column-gap: 20px; align-items: end; }
+  .form.cols2 > :is(.ai-block, .seg, .hint, .actions) { grid-column: 1 / -1; }
+}
+@media (min-width: 1240px) {
+  .home-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+  .acct-cols { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 24px; align-items: start; }
+}
+
 @media (max-width: 420px) {
+  /* Barre IA à trois boutons : un peu plus compacte pour laisser la place à la phrase d'exemple. */
+  .ai-bar { gap: 2px; padding-left: 8px; }
+  .ai-btn { width: 38px; height: 38px; }
   .grid2 { grid-template-columns: 1fr; }
   .amt.big { font-size: 24px; }
 }

@@ -66,10 +66,13 @@ const ICONS = {
   chart: icon('<path d="M4 20h16"/><path d="M7 16v-4M12 16V7M17 16v-6"/>'),
   scan: icon('<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
   open: icon('<circle cx="12" cy="12" r="7.5" stroke-dasharray="3.2 2.6"/>'),
+  home: icon('<path d="M4 11l8-7 8 7"/><path d="M6 9.5V20h12V9.5"/>'),
+  image: icon('<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9.5" cy="10" r="1.5"/><path d="M20 15.5l-4.5-4.5L7 19"/>'),
+  gear: icon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
 };
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
 let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
-let autoPhoto = false;   // raccourci « Ticket » de l'accueil : ouvre l'appareil photo dès l'ouverture du formulaire
+let autoPhoto = false;   // « Ticket » de l'accueil ou 📷 d'un compte (true) : ouvre l'appareil photo dès l'ouverture du formulaire ; 🖼️ d'un compte ('pick') : le choix d'une image
 let pendingSentence = null; // phrase saisie sur la page d'un compte, lue dès l'ouverture du formulaire
 let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
 
@@ -99,7 +102,10 @@ function render() {
   const hash = location.hash || '#/';
   const route = routes.find(([re]) => re.test(hash));
   if (!route) return location.replace('#/');
+  // Sur PC, l'accueil, la page d'un compte et les statistiques prennent toute la largeur ; le reste garde une colonne.
+  view.classList.toggle('wide', /^#\/?$|^#\/compte\/\w+$|^#\/statistiques/.test(hash));
   route[1](...hash.match(route[0]).slice(1));
+  renderSide();
   scrollTo(0, scrollMem.get(hash) ?? 0);
 }
 
@@ -153,6 +159,49 @@ function monthEnd(a, today = store.todayStr()) {
   return { total, items, warn: total < (a.alert ?? 0) };
 }
 
+// Comptes ouverts en deux groupes, avec leur solde pointé (chk) : les courants dans l'ordre des comptes,
+// l'épargne Banque Populaire d'abord, puis du plus gros solde pointé au plus petit.
+function accountGroups(today) {
+  const accs = [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos);
+  const open = accs.filter(a => !a.closed);
+  const chk = new Map(open.map(a => [a.id, store.balances(a.id, today).chk]));
+  const isBP = a => /banque populaire|\bbp\b/.test(norm(`${a.bank ?? ''} ${a.name}`));
+  return {
+    open, closed: accs.filter(a => a.closed), chk,
+    current: open.filter(a => accKind(a) === 'courant'),
+    savings: open.filter(a => accKind(a) === 'epargne').sort((x, y) => (isBP(y) - isBP(x)) || (chk.get(y.id) - chk.get(x.id))),
+  };
+}
+
+// ---------- Barre latérale (PC) : nouvelle opération, menu, comptes avec leur solde pointé ----------
+const wideScreen = matchMedia('(min-width: 1000px)');
+wideScreen.addEventListener('change', () => renderSide());
+
+function renderSide() {
+  const side = $('#side');
+  if (!wideScreen.matches || !store.idx.acc.size) { side.innerHTML = ''; return; }
+  const { current, savings, chk } = accountGroups(store.todayStr());
+  const hash = location.hash || '#/';
+  const accId = hash.match(/^#\/(?:compte|nouvelle-operation|pointage)\/(\w+)/)?.[1];
+  const here = ' class="on" aria-current="page"';
+  const nav = (href, ico, label, re) => `<a href="${href}"${re.test(hash) ? here : ''}>${ico}${label}</a>`;
+  const row = a => `<a class="side-acc${a.id === accId ? ' on' : ''}" href="#/compte/${a.id}"${a.id === accId ? ' aria-current="page"' : ''}>
+    ${bankLogo(a, 28)}<span class="side-name">${esc(a.name)}</span><span class="amt ${negClass(chk.get(a.id))}">${money(chk.get(a.id))}</span></a>`;
+  const group = (title, list) => (list.length ? `<h2 class="side-h"><span>${title}</span>
+    <span class="amt">${money(list.reduce((s, a) => s + chk.get(a.id), 0))}</span></h2>${list.map(row).join('')}` : '');
+  side.innerHTML = `
+    <a class="side-brand" href="#/">💰 Comptes</a>
+    <a class="btn primary" href="#/nouvelle-operation/${store.idx.acc.has(accId) ? accId : defaultAccId()}">${ICON_PLUS}Nouvelle opération</a>
+    <nav class="side-nav" aria-label="Menu">
+      ${nav('#/', ICONS.home, 'Accueil', /^#\/?$/)}
+      ${nav('#/recurrentes', ICONS.repeat, 'Récurrentes', /^#\/(nouvelle-)?recurrente/)}
+      ${nav('#/statistiques', ICONS.chart, 'Statistiques', /^#\/statistiques/)}
+      ${nav('#/reglages', ICONS.gear, 'Réglages', /^#\/reglages/)}
+    </nav>
+    ${group('Comptes courants', current)}
+    ${group('Épargne', savings)}`;
+}
+
 function viewAccounts() {
   setHeader('💰 Comptes', false);
   if (!store.idx.acc.size) {
@@ -169,15 +218,7 @@ function viewAccounts() {
     return;
   }
   const today = store.todayStr();
-  const accs = [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos);
-  const open = accs.filter(a => !a.closed);
-  const closed = accs.filter(a => a.closed);
-  const current = open.filter(a => accKind(a) === 'courant');
-  // Épargne : les comptes Banque Populaire d'abord, puis du plus gros solde pointé au plus petit.
-  const isBP = a => /banque populaire|\bbp\b/.test(norm(`${a.bank ?? ''} ${a.name}`));
-  const chkOf = new Map(open.map(a => [a.id, store.balances(a.id, today).chk]));
-  const savings = open.filter(a => accKind(a) === 'epargne')
-    .sort((x, y) => (isBP(y) - isBP(x)) || (chkOf.get(y.id) - chkOf.get(x.id)));
+  const { open, closed, current, savings } = accountGroups(today);
   const ends = new Map(current.map(a => [a.id, monthEnd(a, today)]));
   // Sur l'accueil, chaque compte affiche son solde pointé : celui de la banque.
   const card = a => {
@@ -193,7 +234,7 @@ function viewAccounts() {
   const tEnd = [...ends.values()].reduce((s, m) => s + m.total, 0);
   const warned = [...ends.values()].filter(m => m.warn).length;
   const section = (title, list, total) => (list.length
-    ? `<h2 class="section-title">${title} <small>${money(total)}</small></h2><div class="list">${list.map(card).join('')}</div>` : '');
+    ? `<div><h2 class="section-title">${title} <small>${money(total)}</small></h2><div class="list">${list.map(card).join('')}</div></div>` : '');
   // Le mois en cours en un coup d'œil, en montants nets comme dans les statistiques.
   const month = stats.inOut(stats.pick(open.map(a => a.id), `${today.slice(0, 8)}01`, today));
   const acc = defaultAccId();
@@ -217,8 +258,10 @@ function viewAccounts() {
       <a class="quick-btn q-recur" href="#/recurrentes"><i>${ICONS.repeat}</i>Récurrentes</a>
       <a class="quick-btn q-stats" href="#/statistiques"><i>${ICONS.chart}</i>Stats</a>
     </nav>
-    ${section('💳 Comptes courants', current, tCurrent)}
-    ${section('🐷 Épargne', savings, tSavings)}
+    <div class="home-cols">
+      ${section('💳 Comptes courants', current, tCurrent)}
+      ${section('🐷 Épargne', savings, tSavings)}
+    </div>
     ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
     <a class="btn ghost block" href="#/nouveau-compte">＋ Nouveau compte</a>`;
 }
@@ -233,23 +276,31 @@ function viewAccount(id) {
   currentAccId = id;
   setHeader(a.name, true);
   const ui = (acctUi[id] ??= { q: '', unchk: false, limit: PAGE });
+  // Sur grand écran : solde et barre IA à gauche, opérations à droite.
   view.innerHTML = `
-    <section class="summary" id="summary"></section>
-    ${aiBar()}
-    <div class="toolbar">
-      <input type="search" id="q" placeholder="Rechercher : libellé, catégorie, montant…" value="${esc(ui.q)}" aria-label="Rechercher">
-      <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">${ICONS.open}Non pointées</button>
-      <button type="button" class="chip" data-action="statement">${ICONS.scan}Pointer avec une capture</button>
+    <div class="acct-cols">
+      <div>
+        <section class="summary" id="summary"></section>
+        ${aiBar()}
+      </div>
+      <div>
+        <div class="toolbar">
+          <input type="search" id="q" placeholder="Rechercher : libellé, catégorie, montant…" value="${esc(ui.q)}" aria-label="Rechercher">
+          <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">${ICONS.open}Non pointées</button>
+          <button type="button" class="chip" data-action="statement">${ICONS.scan}Pointer avec une capture</button>
+        </div>
+        <input type="file" id="stmt" accept="image/*" multiple hidden>
+        <div id="ops"></div>
+      </div>
     </div>
-    <input type="file" id="stmt" accept="image/*" multiple hidden>
-    <div id="ops"></div>
-    <a class="fab" href="#/nouvelle-operation/${id}" aria-label="Nouvelle opération">${ICON_PLUS}</a>`;
+    <a class="fab new-op" href="#/nouvelle-operation/${id}" aria-label="Nouvelle opération">${ICON_PLUS}</a>`;
   renderSummary(id);
   renderOps(id);
   // Saisie par IA : le formulaire de ce compte s'ouvre et lit la phrase, ou l'appareil photo s'ouvre.
   const toForm = () => { location.hash = `#/nouvelle-operation/${id}`; };
   wireAiBar(text => { if (keyOrSettings()) { pendingSentence = text; toForm(); } });
   $('#photo-btn').addEventListener('click', () => { if (keyOrSettings()) { autoPhoto = true; toForm(); } });
+  $('#pick-btn').addEventListener('click', () => { if (keyOrSettings()) { autoPhoto = 'pick'; toForm(); } });
   $('#stmt').addEventListener('change', ev => {
     const files = [...ev.target.files];
     ev.target.value = '';
@@ -407,13 +458,15 @@ const keyOrSettings = () => {
   return false;
 };
 
-// Barre de saisie par IA (formulaire et page d'un compte) : une phrase tapée ou dictée, ou la photo d'un ticket.
-// Champ vide : 🎤 et photo ; champ rempli : 🎤 et envoi.
+// Barre de saisie par IA (formulaire et page d'un compte) : une phrase tapée ou dictée, ou la photo d'un ticket
+// (prise sur le moment, ou une image déjà sur l'appareil : capture d'écran, photo de la galerie).
+// Champ vide : 🎤, appareil photo et image ; champ rempli : 🎤 et envoi.
 const aiBar = () => `<div class="ai-bar" id="ai-bar">
     <span class="ai-ico">${ICONS.sparkle}</span>
     <input id="say" placeholder="Ex. : 12 € pain hier" enterkeyhint="go" autocomplete="off" aria-label="Décrire l'opération en une phrase">
     ${Speech ? `<button type="button" class="ai-btn ai-mic" id="mic" aria-label="Dicter l'opération" aria-pressed="false">${ICONS.mic}</button>` : ''}
     <button type="button" class="ai-btn ai-cam" id="photo-btn" aria-label="Photo du ticket">${ICONS.camera}</button>
+    <button type="button" class="ai-btn ai-cam" id="pick-btn" aria-label="Choisir une image : capture d'écran, photo déjà prise">${ICONS.image}</button>
     <button type="button" class="ai-btn ai-send" id="say-go" aria-label="Remplir d'après la phrase">${ICONS.send}</button>
   </div>`;
 
@@ -472,10 +525,11 @@ function viewEntryForm(id, accId) {
   const defaultMode = (store.data?.modes ?? []).includes('Carte') ? 'Carte' : '';
 
   view.innerHTML = `
-    <form id="f" class="form card" autocomplete="off" novalidate>
-      ${e ? '' : `<div>
+    <form id="f" class="form card cols2" autocomplete="off" novalidate>
+      ${e ? '' : `<div class="ai-block">
         ${aiBar()}
         <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+        <input type="file" id="pick" accept="image/*" hidden>
         <div id="photo-report"></div>
       </div>`}
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
@@ -545,19 +599,19 @@ function viewEntryForm(id, accId) {
   F.title.addEventListener('keydown', ev => { if (ev.key === 'Escape') box.hidden = true; });
 
   // Saisie par photo : Gemini lit le ticket, le formulaire est pré-rempli, l'utilisateur vérifie et enregistre.
-  const photoBtn = $('#photo-btn');
+  const photoBtn = $('#photo-btn'), pickBtn = $('#pick-btn');
   async function readPhoto(file) {
     const report = $('#photo-report');
     report.innerHTML = `<div class="report photo-report"><img src="${URL.createObjectURL(file)}" alt="Photo du ticket"><span>Lecture du ticket…</span></div>`;
     const msg = report.querySelector('span');
-    photoBtn.disabled = true;
+    photoBtn.disabled = pickBtn.disabled = true;
     try {
       msg.textContent = fillFromTicket(await ticket.readTicket(file, ticketContext()));
     } catch (err) {
       report.firstElementChild.classList.add('error');
       msg.textContent = err.message;
     } finally {
-      photoBtn.disabled = false;
+      photoBtn.disabled = pickBtn.disabled = false;
     }
   }
   function fillFromTicket(r) {
@@ -590,27 +644,30 @@ function viewEntryForm(id, accId) {
       : "Rempli d'après la photo : vérifiez le montant et la date, puis Enregistrer.";
   }
   if (photoBtn) {
-    const input = $('#photo');
-    photoBtn.addEventListener('click', () => {
-      if (!ticket.getKey()) {
-        toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
-        location.hash = '#/reglages';
-        return;
-      }
-      input.click();
-    });
-    input.addEventListener('change', () => {
-      const file = input.files[0];
-      input.value = '';
-      if (file) readPhoto(file);
-    });
+    // 📷 ouvre l'appareil photo (capture), 🖼️ le choix d'une image déjà sur l'appareil.
+    for (const [btn, input] of [[photoBtn, $('#photo')], [pickBtn, $('#pick')]]) {
+      btn.addEventListener('click', () => {
+        if (!ticket.getKey()) {
+          toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+          location.hash = '#/reglages';
+          return;
+        }
+        input.click();
+      });
+      input.addEventListener('change', () => {
+        const file = input.files[0];
+        input.value = '';
+        if (file) readPhoto(file);
+      });
+    }
     if (pendingPhoto) {
       const file = pendingPhoto;
       pendingPhoto = null;
       if (ticket.getKey()) readPhoto(file); else toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
     } else if (autoPhoto) {
+      const btn = autoPhoto === 'pick' ? pickBtn : photoBtn;
       autoPhoto = false;
-      photoBtn.click();
+      btn.click();
     }
   }
 
@@ -962,7 +1019,7 @@ function viewOrderForm(id) {
   const next = o && recur.nextDue(o);
 
   view.innerHTML = `
-    <form id="f" class="form card" autocomplete="off" novalidate>
+    <form id="f" class="form card cols2" autocomplete="off" novalidate>
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
         <label><input type="radio" name="type" value="D" ${type === 'D' ? 'checked' : ''}><span>Dépense</span></label>
         <label><input type="radio" name="type" value="R" ${type === 'R' ? 'checked' : ''}><span>Recette</span></label>
@@ -1610,6 +1667,7 @@ async function start() {
     titleIndex = null;
     if (kind === 'local' || kind === 'replace') drive.scheduleSync(kind === 'replace' ? 0 : 2000);
     if (kind === 'remote' || kind === 'replace') refreshListView();
+    renderSide();
     updatePill();
   });
   drive.onStatus(s => {
