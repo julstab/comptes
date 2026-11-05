@@ -54,9 +54,23 @@ function setHeader(title, back) {
 }
 
 const ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+// Icônes au trait des boutons (24 × 24).
+const icon = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICONS = {
+  mic: icon('<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>'),
+  camera: icon('<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2L9 5h6l1.5 2h2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.5" r="3.5"/>'),
+  send: icon('<path d="M5 12h14M13 6l6 6-6 6"/>'),
+  sparkle: icon('<path d="M11 3.5l1.9 5 5 1.9-5 1.9-1.9 5-1.9-5-5-1.9 5-1.9z"/><path d="M18.5 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>'),
+  pencil: icon('<path d="M15.5 5.5l3 3L8 19H5v-3z"/><path d="M13.5 7.5l3 3"/>'),
+  repeat: icon('<path d="M17 3l3 3-3 3"/><path d="M4 12v-1a5 5 0 0 1 5-5h11"/><path d="M7 21l-3-3 3-3"/><path d="M20 12v1a5 5 0 0 1-5 5H4"/>'),
+  chart: icon('<path d="M4 20h16"/><path d="M7 16v-4M12 16V7M17 16v-6"/>'),
+  scan: icon('<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'),
+  open: icon('<circle cx="12" cy="12" r="7.5" stroke-dasharray="3.2 2.6"/>'),
+};
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
 let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
 let autoPhoto = false;   // raccourci « Ticket » de l'accueil : ouvre l'appareil photo dès l'ouverture du formulaire
+let pendingSentence = null; // phrase saisie sur la page d'un compte, lue dès l'ouverture du formulaire
 let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
 
 // ---------- Navigation ----------
@@ -105,6 +119,7 @@ $('#back').addEventListener('click', () => goBack());
 // Re-dessine l'écran courant (après une synchro) s'il ne contient pas de formulaire en cours.
 function refreshListView() {
   if (currentHash === '#/reglages') return renderDataCard();
+  if (listening || $('#say')?.value) return; // phrase en cours de saisie ou de dictée sur la page d'un compte
   if (/^#\/?$|^#\/compte\/\w+$|^#\/recurrentes$|^#\/statistiques/.test(currentHash)) {
     scrollMem.set(currentHash, scrollY);
     render();
@@ -112,7 +127,6 @@ function refreshListView() {
 }
 
 // ---------- Écran : liste des comptes ----------
-const dayFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
 
 // Compte proposé par défaut pour une nouvelle saisie : celui de la dernière saisie, sinon le premier compte ouvert.
 function defaultAccId() {
@@ -159,7 +173,11 @@ function viewAccounts() {
   const open = accs.filter(a => !a.closed);
   const closed = accs.filter(a => a.closed);
   const current = open.filter(a => accKind(a) === 'courant');
-  const savings = open.filter(a => accKind(a) === 'epargne');
+  // Épargne : les comptes Banque Populaire d'abord, puis du plus gros solde pointé au plus petit.
+  const isBP = a => /banque populaire|\bbp\b/.test(norm(`${a.bank ?? ''} ${a.name}`));
+  const chkOf = new Map(open.map(a => [a.id, store.balances(a.id, today).chk]));
+  const savings = open.filter(a => accKind(a) === 'epargne')
+    .sort((x, y) => (isBP(y) - isBP(x)) || (chkOf.get(y.id) - chkOf.get(x.id)));
   const ends = new Map(current.map(a => [a.id, monthEnd(a, today)]));
   // Sur l'accueil, chaque compte affiche son solde pointé : celui de la banque.
   const card = a => {
@@ -181,25 +199,23 @@ function viewAccounts() {
   const acc = defaultAccId();
   view.innerHTML = `
     <section class="hero">
-      <div class="hero-top">
-        <span class="hero-hello">${new Date().getHours() < 18 ? 'Bonjour ☀️' : 'Bonsoir 🌙'}</span>
-        <span class="hero-date">${dayFmt.format(new Date())}</span>
+      <div class="hero-main">
+        <div class="hero-left">
+          <span class="hero-label">Comptes courants</span>
+          <span class="hero-total">${money(tCurrent)}</span>
+        </div>
+        <div class="hero-side">
+          ${current.length ? `<div${warned ? ` title="${plural(warned, 'compte à surveiller', 'comptes à surveiller')}"` : ''}><span>${warned ? '⚠️ ' : ''}Fin du mois</span><b>${money(tEnd)}</b></div>` : ''}
+          <div><span>Épargne</span><b>${money(tSavings)}</b></div>
+        </div>
       </div>
-      <span class="hero-label">Comptes courants</span>
-      <span class="hero-total">${money(tCurrent)}</span>
-      ${current.length ? `<span class="hero-sub">📅 Fin du mois : <b>${money(tEnd)}</b></span>` : ''}
-      <span class="hero-sub">🐷 Épargne : <b>${money(tSavings)}</b></span>
-      <div class="hero-chips">
-        <span class="hero-chip">💸 ${money(month.out)} dépensés ce mois-ci</span>
-        <span class="hero-chip">💰 ${money(month.in)} reçus</span>
-        ${warned ? `<span class="hero-chip">⚠️ ${plural(warned, 'compte à surveiller', 'comptes à surveiller')}</span>` : ''}
-      </div>
+      <div class="hero-foot">Ce mois-ci : <b>${money(month.out)}</b> dépensés · <b>${money(month.in)}</b> reçus</div>
     </section>
     <nav class="quick" aria-label="Raccourcis">
-      <a class="quick-btn q-add" href="#/nouvelle-operation/${acc}"><i aria-hidden="true">✏️</i>Saisir</a>
-      <a class="quick-btn q-photo" href="#/nouvelle-operation/${acc}" data-action="quick-photo"><i aria-hidden="true">📸</i>Ticket</a>
-      <a class="quick-btn q-recur" href="#/recurrentes"><i aria-hidden="true">🔁</i>Récurrentes</a>
-      <a class="quick-btn q-stats" href="#/statistiques"><i aria-hidden="true">📊</i>Stats</a>
+      <a class="quick-btn q-add" href="#/nouvelle-operation/${acc}"><i>${ICONS.pencil}</i>Saisir</a>
+      <a class="quick-btn q-photo" href="#/nouvelle-operation/${acc}" data-action="quick-photo"><i>${ICONS.camera}</i>Ticket</a>
+      <a class="quick-btn q-recur" href="#/recurrentes"><i>${ICONS.repeat}</i>Récurrentes</a>
+      <a class="quick-btn q-stats" href="#/statistiques"><i>${ICONS.chart}</i>Stats</a>
     </nav>
     ${section('💳 Comptes courants', current, tCurrent)}
     ${section('🐷 Épargne', savings, tSavings)}
@@ -219,17 +235,21 @@ function viewAccount(id) {
   const ui = (acctUi[id] ??= { q: '', unchk: false, limit: PAGE });
   view.innerHTML = `
     <section class="summary" id="summary"></section>
+    ${aiBar()}
     <div class="toolbar">
       <input type="search" id="q" placeholder="Rechercher : libellé, catégorie, montant…" value="${esc(ui.q)}" aria-label="Rechercher">
-      <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">Non pointées</button>
-      <button type="button" class="chip" data-action="statement">📷 Pointer avec une capture</button>
-      <a class="chip" href="#/compte/${id}/modifier">Modifier le compte</a>
+      <button type="button" class="chip ${ui.unchk ? 'on' : ''}" data-action="toggle-unchk" aria-pressed="${ui.unchk}">${ICONS.open}Non pointées</button>
+      <button type="button" class="chip" data-action="statement">${ICONS.scan}Pointer avec une capture</button>
     </div>
     <input type="file" id="stmt" accept="image/*" multiple hidden>
     <div id="ops"></div>
     <a class="fab" href="#/nouvelle-operation/${id}" aria-label="Nouvelle opération">${ICON_PLUS}</a>`;
   renderSummary(id);
   renderOps(id);
+  // Saisie par IA : le formulaire de ce compte s'ouvre et lit la phrase, ou l'appareil photo s'ouvre.
+  const toForm = () => { location.hash = `#/nouvelle-operation/${id}`; };
+  wireAiBar(text => { if (keyOrSettings()) { pendingSentence = text; toForm(); } });
+  $('#photo-btn').addEventListener('click', () => { if (keyOrSettings()) { autoPhoto = true; toForm(); } });
   $('#stmt').addEventListener('change', ev => {
     const files = [...ev.target.files];
     ev.target.value = '';
@@ -247,23 +267,24 @@ function viewAccount(id) {
 function renderSummary(id) {
   const b = store.balances(id);
   const a = store.idx.acc.get(id);
+  const later = `<div><span class="label">Après les opé. à venir</span><span class="amt ${negClass(b.all)}">${money(b.all)}</span></div>`;
   $('#summary').innerHTML = `
-    <div class="summary-head">${bankLogo(a, 32)}<span>${esc(a.bank || a.name)}</span></div>
-    <span class="label">Solde pointé</span><span class="amt big ${negClass(b.chk)}">${money(b.chk)}</span>
-    <div class="row2">
-      <div><span class="label">Avec les opérations à venir</span><span class="amt ${negClass(b.all)}">${money(b.all)}</span></div>
-    </div>
-    ${accKind(a) === 'courant' ? monthEndHtml(a, monthEnd(a)) : ''}`;
+    <div class="summary-head">${bankLogo(a, 44)}
+      <div><span class="label">Solde pointé</span><span class="amt big ${negClass(b.chk)}">${money(b.chk)}</span></div>
+      <a class="icon-btn" href="#/compte/${id}/modifier" aria-label="Modifier le compte" title="Modifier le compte">${ICONS.pencil}</a></div>
+    ${accKind(a) === 'courant' ? monthEndHtml(a, monthEnd(a), later) : `<div class="row2">${later}</div>`}`;
 }
 
-// Solde prévu à la fin du mois, avec le détail de ce qui reste à passer.
-function monthEndHtml(a, m) {
-  const head = `<span class="label">📅 Fin du mois prévue</span>
-    <span class="amt ${m.warn ? 'warn' : negClass(m.total)}">${m.warn ? '⚠️ ' : ''}${money(m.total)}</span>`;
-  const why = !m.warn ? '' : a.alert ? `Sous le seuil d'alerte de ${money(a.alert)}. ` : 'Solde prévu négatif. ';
-  if (!m.items.length) return `<div class="month-end">${head}<span class="sub">${why}Rien d'autre de prévu ce mois-ci.</span></div>`;
-  return `<details class="month-end"><summary>${head}
-      <span class="sub">${why}${plural(m.items.length, 'opération à venir', 'opérations à venir')} : voir le détail</span></summary>
+// Solde avec les opérations à venir (later) et solde prévu à la fin du mois côte à côte,
+// avec le détail de ce qui reste à passer ce mois-ci.
+function monthEndHtml(a, m, later) {
+  const cols = `<div class="row2">${later}
+    <div><span class="label">Fin du mois prévue</span>
+    <span class="amt ${m.warn ? 'warn' : negClass(m.total)}">${m.warn ? '⚠️ ' : ''}${money(m.total)}</span></div></div>`;
+  const why = !m.warn ? '' : a.alert ? `Sous le seuil d'alerte de ${money(a.alert)} · ` : 'Solde prévu négatif · ';
+  if (!m.items.length) return `<div class="month-end">${cols}<span class="sub">${why}Rien d'autre de prévu ce mois-ci.</span></div>`;
+  return `<details class="month-end"><summary>${cols}
+      <span class="sub">${why}${plural(m.items.length, 'opération à venir', 'opérations à venir')} ›</span></summary>
     <ul>${m.items.map(i => `<li><span>${dayMonth(i.date)} · ${esc(i.title || '(sans libellé)')}</span>
       <span class="amt ${i.amt > 0 ? 'pos' : ''}">${signed(i.amt)}</span></li>`).join('')}</ul>
   </details>`;
@@ -379,6 +400,67 @@ function twinCat(id) {
 // Reconnaissance vocale du navigateur (Chrome) : absente ailleurs, le 🎤 n'est alors pas affiché.
 const Speech = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 
+const keyOrSettings = () => {
+  if (ticket.getKey()) return true;
+  toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
+  location.hash = '#/reglages';
+  return false;
+};
+
+// Barre de saisie par IA (formulaire et page d'un compte) : une phrase tapée ou dictée, ou la photo d'un ticket.
+// Champ vide : 🎤 et photo ; champ rempli : 🎤 et envoi.
+const aiBar = () => `<div class="ai-bar" id="ai-bar">
+    <span class="ai-ico">${ICONS.sparkle}</span>
+    <input id="say" placeholder="Ex. : 12 € pain hier" enterkeyhint="go" autocomplete="off" aria-label="Décrire l'opération en une phrase">
+    ${Speech ? `<button type="button" class="ai-btn ai-mic" id="mic" aria-label="Dicter l'opération" aria-pressed="false">${ICONS.mic}</button>` : ''}
+    <button type="button" class="ai-btn ai-cam" id="photo-btn" aria-label="Photo du ticket">${ICONS.camera}</button>
+    <button type="button" class="ai-btn ai-send" id="say-go" aria-label="Remplir d'après la phrase">${ICONS.send}</button>
+  </div>`;
+
+// Branche la barre : onSentence(texte) pour une phrase tapée (Entrée, envoi) ou dictée.
+function wireAiBar(onSentence) {
+  const bar = $('#ai-bar'), say = $('#say');
+  const sync = () => bar.classList.toggle('has-text', !!say.value.trim());
+  const send = () => { const text = say.value.trim(); if (text) onSentence(text); else say.focus(); };
+  say.addEventListener('input', sync);
+  say.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); send(); } });
+  $('#say-go').addEventListener('click', send);
+  const mic = $('#mic');
+  mic?.addEventListener('click', () => dictate(mic, text => { say.value = text; sync(); }, onSentence));
+  return { say, sync };
+}
+
+// Dictée par la reconnaissance vocale du navigateur ; le bouton est rouge pendant l'écoute (un appui l'arrête).
+// onPartial reçoit le texte au fil de l'eau, onDone la phrase finale.
+let listening = null;
+function dictate(btn, onPartial, onDone) {
+  if (listening) return listening.stop();
+  if (!keyOrSettings()) return;
+  const rec = new Speech();
+  rec.lang = 'fr-FR';
+  rec.interimResults = true;
+  let heard = '', failed = false;
+  rec.onresult = ev => { heard = [...ev.results].map(x => x[0].transcript).join(''); onPartial(heard); };
+  rec.onerror = ev => {
+    failed = true;
+    if (ev.error === 'aborted') return;
+    toast(ev.error === 'not-allowed' || ev.error === 'service-not-allowed' ? 'Micro refusé : autorisez-le pour ce site dans Chrome.'
+      : ev.error === 'no-speech' ? 'Rien entendu : réessayez.'
+        : ev.error === 'network' ? 'Dictée impossible sans connexion.' : `Dictée impossible (${ev.error}).`);
+  };
+  rec.onend = () => {
+    listening = null;
+    btn.classList.remove('on');
+    btn.setAttribute('aria-pressed', 'false');
+    if (!failed && heard.trim() && btn.isConnected) onDone(heard.trim());
+  };
+  try { rec.start(); } catch { return toast('Dictée impossible.'); }
+  listening = rec;
+  onPartial('');
+  btn.classList.add('on');
+  btn.setAttribute('aria-pressed', 'true');
+}
+
 function viewEntryForm(id, accId) {
   const e = id ? store.idx.entry.get(id) : null;
   if (id && !e) return location.replace('#/');
@@ -392,13 +474,8 @@ function viewEntryForm(id, accId) {
   view.innerHTML = `
     <form id="f" class="form card" autocomplete="off" novalidate>
       ${e ? '' : `<div>
-        <button type="button" class="btn photo block" id="photo-btn">📸 Photo du ticket</button>
+        ${aiBar()}
         <input type="file" id="photo" accept="image/*" capture="environment" hidden>
-        <div class="say">
-          <input id="say" placeholder="Ex. : 12 € pain hier" enterkeyhint="go" aria-label="Décrire l'opération en une phrase">
-          ${Speech ? '<button type="button" class="btn ghost" id="mic" aria-label="Dicter l\'opération" aria-pressed="false">🎤</button>' : ''}
-          <button type="button" class="btn ghost" id="say-go" aria-label="Remplir d'après la phrase">➜</button>
-        </div>
         <div id="photo-report"></div>
       </div>`}
       <div class="seg" role="radiogroup" aria-label="Type d'opération">
@@ -540,12 +617,6 @@ function viewEntryForm(id, accId) {
   // Saisie par phrase, tapée ou dictée : Gemini la lit et reconnaît le libellé habituel,
   // puis l'historique de ce libellé complète le reste (catégorie, mode, compte, montant non dit).
   const say = $('#say');
-  const keyOrSettings = () => {
-    if (ticket.getKey()) return true;
-    toast("Ajoutez d'abord votre clé Gemini dans les Réglages.");
-    location.hash = '#/reglages';
-    return false;
-  };
   async function readSentence() {
     const text = say.value.trim();
     if (!text) return say.focus();
@@ -611,39 +682,13 @@ function viewEntryForm(id, accId) {
         : "Rempli d'après la phrase : vérifiez, puis Enregistrer.";
   }
   if (say) {
-    say.addEventListener('keydown', ev => {
-      if (ev.key === 'Enter') { ev.preventDefault(); readSentence(); }
-    });
-    $('#say-go').addEventListener('click', readSentence);
-    const mic = $('#mic');
-    let listening = null;
-    mic?.addEventListener('click', () => {
-      if (listening) return listening.stop();
-      if (!keyOrSettings()) return;
-      const rec = new Speech();
-      rec.lang = 'fr-FR';
-      rec.interimResults = true;
-      let heard = '', failed = false;
-      rec.onresult = ev => { heard = [...ev.results].map(x => x[0].transcript).join(''); say.value = heard; };
-      rec.onerror = ev => {
-        failed = true;
-        if (ev.error === 'aborted') return;
-        toast(ev.error === 'not-allowed' || ev.error === 'service-not-allowed' ? 'Micro refusé : autorisez-le pour ce site dans Chrome.'
-          : ev.error === 'no-speech' ? 'Rien entendu : réessayez.'
-            : ev.error === 'network' ? 'Dictée impossible sans connexion.' : `Dictée impossible (${ev.error}).`);
-      };
-      rec.onend = () => {
-        listening = null;
-        mic.classList.remove('on');
-        mic.setAttribute('aria-pressed', 'false');
-        if (!failed && heard.trim() && say.isConnected) readSentence();
-      };
-      try { rec.start(); } catch { return toast('Dictée impossible.'); }
-      listening = rec;
-      say.value = '';
-      mic.classList.add('on');
-      mic.setAttribute('aria-pressed', 'true');
-    });
+    const { sync } = wireAiBar(() => readSentence());
+    if (pendingSentence) { // phrase saisie ou dictée depuis la page d'un compte
+      say.value = pendingSentence;
+      pendingSentence = null;
+      sync();
+      readSentence();
+    }
   }
 
   f.addEventListener('submit', async ev => {
