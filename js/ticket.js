@@ -2,7 +2,10 @@
 // La clé API est propre à chaque appareil : elle reste dans le navigateur, jamais dans le code ni sur le Drive.
 const KEY_STORE = 'comptes.geminiKey';
 const MODEL = 'gemini-3.5-flash-lite';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const FALLBACK = 'gemini-3.1-flash-lite';
+const endpoint = model => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+// Gemini surchargé (erreur 5xx) : on réessaie seul, le même modèle après une pause, puis un autre modèle gratuit, qui a son propre quota.
+const TRIES = [[MODEL, 0], [MODEL, 1500], [FALLBACK, 0], [FALLBACK, 3000]];
 
 export const getKey = () => localStorage.getItem(KEY_STORE) ?? '';
 export const setKey = k => (k ? localStorage.setItem(KEY_STORE, k) : localStorage.removeItem(KEY_STORE));
@@ -65,11 +68,25 @@ const toBase64 = blob => new Promise((resolve, reject) => {
 });
 
 async function call(body, key) {
+  let last;
+  for (const [model, wait] of TRIES) {
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait + Math.random() * 500));
+    try {
+      return await callModel(model, body, key);
+    } catch (err) {
+      if (!(err.status >= 500)) throw err;
+      last = err;
+    }
+  }
+  throw last;
+}
+
+async function callModel(model, body, key) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 45000);
   let res;
   try {
-    res = await fetch(ENDPOINT, {
+    res = await fetch(endpoint(model), {
       method: 'POST', signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify(body),
@@ -83,6 +100,7 @@ async function call(body, key) {
   const msg = (await res.json().catch(() => null))?.error?.message ?? '';
   const err = new Error(
     res.status === 429 ? 'Quota gratuit Gemini atteint, réessayez plus tard.'
+      : res.status === 503 ? 'Gemini est surchargé en ce moment, réessayez dans une minute.'
       : /api key/i.test(msg) || res.status === 401 || res.status === 403 ? 'Clé Gemini refusée : vérifiez-la dans les Réglages.'
         : `Gemini : erreur ${res.status}${msg ? ` (${msg})` : ''}`,
   );
