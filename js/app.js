@@ -165,17 +165,18 @@ function monthEnd(a, today = store.todayStr()) {
   return { total, items, warn: total < (a.alert ?? 0) };
 }
 
-// Comptes ouverts en deux groupes, avec leur solde pointé (chk) : les courants dans l'ordre des comptes,
-// l'épargne Banque Populaire d'abord, puis du plus gros solde pointé au plus petit.
+// Comptes ouverts en deux groupes, avec leur solde pointé (chk). Les comptes marqués « toujours en haut » (top) d'abord ;
+// puis les courants dans l'ordre des comptes, l'épargne Banque Populaire d'abord, puis du plus gros solde pointé au plus petit.
 function accountGroups(today) {
   const accs = [...store.idx.acc.values()].sort((a, b) => a.pos - b.pos);
   const open = accs.filter(a => !a.closed);
   const chk = new Map(open.map(a => [a.id, store.balances(a.id, today).chk]));
   const isBP = a => /banque populaire|\bbp\b/.test(norm(`${a.bank ?? ''} ${a.name}`));
+  const top = (x, y) => !!y.top - !!x.top;
   return {
     open, closed: accs.filter(a => a.closed), chk,
-    current: open.filter(a => accKind(a) === 'courant'),
-    savings: open.filter(a => accKind(a) === 'epargne').sort((x, y) => (isBP(y) - isBP(x)) || (chk.get(y.id) - chk.get(x.id))),
+    current: open.filter(a => accKind(a) === 'courant').sort(top),
+    savings: open.filter(a => accKind(a) === 'epargne').sort((x, y) => top(x, y) || (isBP(y) - isBP(x)) || (chk.get(y.id) - chk.get(x.id))),
   };
 }
 
@@ -1545,6 +1546,7 @@ function viewAccountForm(id) {
       <label class="field" id="alert-field" ${a && accKind(a) === 'epargne' ? 'hidden' : ''}>
         <span>Seuil d'alerte <em>(⚠️ si le solde prévu en fin de mois passe dessous ; 0 si vide, négatif si découvert)</em></span>
         <input name="alert" inputmode="decimal" placeholder="0,00" value="${a?.alert ? (a.alert < 0 ? '-' : '') + amountInput(a.alert) : ''}"></label>
+      <label class="check"><input type="checkbox" name="top" ${a?.top ? 'checked' : ''}> Toujours en haut de sa section sur l'accueil</label>
       ${a ? `<label class="check"><input type="checkbox" name="closed" ${a.closed ? 'checked' : ''}> Compte clôturé (rangé à part dans la liste)</label>`
         : '<label class="field"><span>Solde initial <em>(facultatif, négatif si découvert)</em></span><input name="init" inputmode="decimal" placeholder="0,00"></label>'}
       <div class="actions">
@@ -1575,6 +1577,7 @@ function viewAccountForm(id) {
     const maxPos = Math.max(-1, ...[...store.idx.acc.values()].map(x => x.pos));
     const rec = { ...(a ?? { id: store.newId(), pos: maxPos + 1 }), name, bank: F.bank.value.trim(), kind: F.kind.value };
     if (a) { if (F.closed.checked) rec.closed = true; else delete rec.closed; }
+    if (F.top.checked) rec.top = true; else delete rec.top;
     if (alertAmt) rec.alert = alertAmt; else delete rec.alert;
     await store.upsert('accounts', rec);
     if (init) {
