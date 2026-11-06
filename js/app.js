@@ -897,6 +897,15 @@ function viewEntryForm(id, accId) {
     }
     if (F.chk.checked) rec.chk = true; else delete rec.chk;
 
+    // Nouvelle opération : alerte si elle semble déjà saisie (ou déjà créée par une récurrente), sur ce compte
+    // comme sur celui du virement.
+    if (!e) {
+      const twins = [...lookalikes(rec.acc, rec.amt, rec.date), ...(F.pair.value ? lookalikes(F.pair.value, -rec.amt, rec.date) : [])];
+      if (twins.length && !confirm(`Cette opération ressemble à ${twins.length > 1 ? 'des opérations déjà saisies' : 'une opération déjà saisie'} :\n`
+        + twins.slice(0, 4).map(x => `• ${dayMonth(x.date)} · ${x.title || '(sans libellé)'} · ${signed(x.amt)} (${store.idx.acc.get(x.acc)?.name ?? ''})`).join('\n')
+        + '\n\nL\'enregistrer quand même ?')) return;
+    }
+
     const items = [['entries', rec]];
     if (F.pair.value) {
       // L'autre moitié reprend libellé, date, mode et référence ; elle garde sa catégorie et son pointage.
@@ -930,6 +939,12 @@ function viewEntryForm(id, accId) {
     toast('🗑️ Opération supprimée');
     goBack(`#/compte/${e.acc}`);
   });
+}
+
+// Opérations d'un compte qui ressemblent à une nouvelle saisie : même montant, même jour ou un jour d'écart.
+function lookalikes(acc, amt, date) {
+  const t = Date.parse(date);
+  return (store.idx.byAcc.get(acc) ?? []).filter(x => x.amt === amt && Math.abs(Date.parse(x.date) - t) <= 86400000);
 }
 
 // Ce que Gemini doit connaître pour reprendre les habitudes de saisie : libellés récents, catégories, modes.
