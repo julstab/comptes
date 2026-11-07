@@ -76,7 +76,7 @@ const ICONS = {
 };
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
 let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
-let autoPhoto = false;   // « Ticket » de l'accueil ou 📷 d'un compte (true) : ouvre l'appareil photo dès l'ouverture du formulaire ; 🖼️ d'un compte ('pick') : le choix d'une image
+let autoPhoto = false;   // 📷 d'un compte (true) : ouvre l'appareil photo dès l'ouverture du formulaire ; 🖼️ d'un compte ('pick') : le choix d'une image
 let pendingSentence = null; // phrase saisie sur la page d'un compte, lue dès l'ouverture du formulaire
 let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
 let opSel = null; // sélection de plusieurs opérations d'un compte : { acc, ids (Set), shown (identifiants affichés) }, oubliée en changeant d'écran
@@ -108,11 +108,12 @@ function render() {
   const hash = location.hash || '#/';
   const route = routes.find(([re]) => re.test(hash));
   if (!route) return location.replace('#/');
-  document.body.classList.remove('picking'); // choix de catégorie laissé ouvert en quittant le formulaire
+  document.body.classList.remove('picking', 'selecting'); // choix de catégorie, sélection d'opérations : laissés en quittant l'écran
   // Sur PC, l'accueil, la page d'un compte et les statistiques prennent toute la largeur ; le reste garde une colonne.
   view.classList.toggle('wide', /^#\/?$|^#\/compte\/\w+$|^#\/statistiques/.test(hash));
   route[1](...hash.match(route[0]).slice(1));
   $('#search-btn').hidden = !/^#\/?$/.test(hash) || !store.idx.acc.size; // loupe de l'accueil
+  renderTabbar(hash);
   renderSide();
   scrollTo(0, scrollMem.get(hash) ?? 0);
 }
@@ -184,6 +185,29 @@ function accountGroups(today) {
   };
 }
 
+// ---------- Barre de navigation du bas (téléphone) : sur les écrans principaux, pas dans les formulaires ----------
+const TABBAR_PAGES = /^#\/?$|^#\/compte\/\w+$|^#\/statistiques|^#\/recurrentes$|^#\/reglages$|^#\/recherche$/;
+
+function renderTabbar(hash) {
+  const bar = $('#tabbar');
+  const show = TABBAR_PAGES.test(hash) && store.idx.acc.size > 0;
+  bar.hidden = !show;
+  document.body.classList.toggle('has-tabbar', show);
+  if (!show) return;
+  // Le ＋ : une récurrente sur leur page, sinon une opération (dans le compte ouvert, ou celui de la dernière saisie).
+  const accId = hash.match(/^#\/compte\/(\w+)$/)?.[1];
+  const plus = hash === '#/recurrentes'
+    ? ['#/nouvelle-recurrente', 'Nouvelle opération récurrente']
+    : [`#/nouvelle-operation/${store.idx.acc.has(accId) ? accId : defaultAccId()}`, 'Nouvelle opération'];
+  const link = (href, ico, label, re) => `<a href="${href}"${re.test(hash) ? ' class="on" aria-current="page"' : ''}>${ico}${label}</a>`;
+  bar.innerHTML = `
+    ${link('#/', ICONS.home, 'Accueil', /^#\/?$/)}
+    ${link('#/statistiques', ICONS.chart, 'Stats', /^#\/statistiques/)}
+    <a class="tab-plus" href="${plus[0]}" aria-label="${plus[1]}" title="${plus[1]}"><i>${ICON_PLUS}</i></a>
+    ${link('#/recurrentes', ICONS.repeat, 'Récurrentes', /^#\/recurrentes/)}
+    ${link('#/reglages', ICONS.gear, 'Réglages', /^#\/reglages/)}`;
+}
+
 // ---------- Barre latérale (PC) : nouvelle opération, menu, comptes avec leur solde pointé ----------
 const wideScreen = matchMedia('(min-width: 1000px)');
 wideScreen.addEventListener('change', () => renderSide());
@@ -213,8 +237,12 @@ function renderSide() {
     ${group('Épargne', savings)}`;
 }
 
+// Onglet de l'accueil (courant, epargne, tous), retenu sur cet appareil.
+const HOME_TAB = 'comptes.homeTab';
+let homeTab = (() => { try { return localStorage.getItem(HOME_TAB) || 'courant'; } catch { return 'courant'; } })();
+
 function viewAccounts() {
-  setHeader('💰 Comptes', false);
+  setHeader('Comptes', false);
   if (!store.idx.acc.size) {
     view.innerHTML = `
       <section class="empty-state">
@@ -229,52 +257,47 @@ function viewAccounts() {
     return;
   }
   const today = store.todayStr();
-  const { open, closed, current, savings } = accountGroups(today);
+  const { open, closed, current, savings, chk } = accountGroups(today);
   const ends = new Map(current.map(a => [a.id, monthEnd(a, today)]));
   // Sur l'accueil, chaque compte affiche son solde pointé : celui de la banque.
-  const card = a => {
-    const { chk } = store.balances(a.id, today);
+  const row = a => {
+    const c = chk.get(a.id) ?? store.balances(a.id, today).chk; // les comptes clôturés ne sont pas dans chk
     return `<a class="acc" href="#/compte/${a.id}">
-      ${bankLogo(a)}
+      ${bankLogo(a, 34)}
       <span class="acc-main"><span class="acc-name">${esc(a.name)}</span><span class="acc-bank">${esc(a.bank)}</span></span>
-      <span class="acc-bal"><span class="amt ${negClass(chk)}">${money(chk)}</span></span>
+      <span class="acc-bal"><span class="amt ${c > 0 ? 'pos' : negClass(c)}">${money(c)}</span></span>
     </a>`;
   };
-  const totalOf = list => list.reduce((s, a) => s + store.balances(a.id, today).chk, 0);
+  const totalOf = list => list.reduce((s, a) => s + chk.get(a.id), 0);
   const tCurrent = totalOf(current), tSavings = totalOf(savings);
   const tEnd = [...ends.values()].reduce((s, m) => s + m.total, 0);
   const warned = [...ends.values()].filter(m => m.warn).length;
-  const section = (title, list, total) => (list.length
-    ? `<div><h2 class="section-title">${title} <small>${money(total)}</small></h2><div class="list">${list.map(card).join('')}</div></div>` : '');
+  const endHtml = `fin du mois <span class="amt ${warned ? 'warn' : negClass(tEnd)}"${warned ? ` title="${plural(warned, 'compte à surveiller', 'comptes à surveiller')}"` : ''}>${warned ? '⚠️ ' : ''}${money(tEnd)}</span>`;
   // Le mois en cours en un coup d'œil, en montants nets comme dans les statistiques.
   const month = stats.inOut(stats.pick(open.map(a => a.id), `${today.slice(0, 8)}01`, today));
-  const acc = defaultAccId();
-  view.innerHTML = `
-    <section class="hero">
-      <div class="hero-main">
-        <div class="hero-left">
-          <span class="hero-label">Comptes courants</span>
-          <span class="hero-total">${money(tCurrent)}</span>
-        </div>
-        <div class="hero-side">
-          ${current.length ? `<div${warned ? ` title="${plural(warned, 'compte à surveiller', 'comptes à surveiller')}"` : ''}><span>${warned ? '⚠️ ' : ''}Fin du mois</span><b>${money(tEnd)}</b></div>` : ''}
-          <div><span>Épargne</span><b>${money(tSavings)}</b></div>
-        </div>
-      </div>
-      <div class="hero-foot">Ce mois-ci : <b>${money(month.out)}</b> dépensés · <b>${money(month.in)}</b> reçus</div>
+  // Total en haut selon l'onglet : comptes courants (et leur fin de mois), épargne, ou tout.
+  const tab = ['courant', 'epargne', 'tous'].includes(homeTab) ? homeTab : 'courant';
+  const head = {
+    courant: [tCurrent, `Comptes courants · ${endHtml}`],
+    epargne: [tSavings, `Épargne · ${plural(savings.length, 'compte', 'comptes')}`],
+    tous: [tCurrent + tSavings, `Tous les comptes · ${endHtml}`],
+  }[tab];
+  const flat = list => (list.length ? `<div class="flat">${list.map(row).join('')}</div>` : '<p class="empty">Aucun compte.</p>');
+  const group = (title, list, total) => (list.length
+    ? `<div><h2 class="section-title">${title} <small>${money(total)}</small></h2>${flat(list)}</div>` : '');
+  const tabBtn = (id, label) => `<button type="button" data-action="home-tab" data-tab="${id}" class="${tab === id ? 'on' : ''}" aria-pressed="${tab === id}">${label}</button>`;
+  view.innerHTML = `<div class="home ${tab === 'tous' ? 'home-all' : ''}">
+    <section class="home-head">
+      <div class="home-total amt ${negClass(head[0])}">${money(head[0])}</div>
+      <div class="home-sub">${head[1]}</div>
+      <div class="home-month">Ce mois-ci : <b>${money(month.out)}</b> dépensés · <b>${money(month.in)}</b> reçus</div>
     </section>
-    <nav class="quick" aria-label="Raccourcis">
-      <a class="quick-btn q-add" href="#/nouvelle-operation/${acc}"><i>${ICONS.pencil}</i>Saisir</a>
-      <a class="quick-btn q-photo" href="#/nouvelle-operation/${acc}" data-action="quick-photo"><i>${ICONS.camera}</i>Ticket</a>
-      <a class="quick-btn q-recur" href="#/recurrentes"><i>${ICONS.repeat}</i>Récurrentes</a>
-      <a class="quick-btn q-stats" href="#/statistiques"><i>${ICONS.chart}</i>Stats</a>
-    </nav>
-    <div class="home-cols">
-      ${section('💳 Comptes courants', current, tCurrent)}
-      ${section('🐷 Épargne', savings, tSavings)}
-    </div>
-    ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary><div class="list">${closed.map(card).join('')}</div></details>` : ''}
-    <a class="btn ghost block" href="#/nouveau-compte">＋ Nouveau compte</a>`;
+    <div class="seg-tabs" role="group" aria-label="Comptes affichés">${tabBtn('tous', 'Tous')}${tabBtn('courant', 'Courants')}${tabBtn('epargne', 'Épargne')}</div>
+    ${tab === 'tous'
+      ? `<div class="home-cols">${group('Comptes courants', current, tCurrent)}${group('Épargne', savings, tSavings)}</div>`
+      : flat(tab === 'courant' ? current : savings)}
+    ${closed.length ? `<details class="closed"><summary>Comptes clôturés (${closed.length})</summary>${flat(closed)}</details>` : ''}
+    <a class="btn ghost block" href="#/nouveau-compte">＋ Nouveau compte</a></div>`;
 }
 
 // ---------- Écran : opérations d'un compte ----------
@@ -428,6 +451,7 @@ function renderOps(id) {
     : `<p class="empty">${ui.unchk && !q ? '🎉 Tout est pointé !' : q ? '🔍 Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`)
     + (sel ? '<div class="sel-actions" id="sel-actions"></div>' : '');
   $('.fab.new-op').hidden = !!sel;
+  document.body.classList.toggle('selecting', !!sel); // la barre du bas laisse la place à celle de la sélection
   if (sel) {
     opSel.shown = visible; // « Tout » ne coche pas les opérations des mois repliés
     renderSelBar();
@@ -1934,9 +1958,10 @@ const actions = {
     }
     $('#stmt').click();
   },
-  'quick-photo'() {
-    autoPhoto = true;
-    location.hash = `#/nouvelle-operation/${defaultAccId()}`;
+  'home-tab'(el) {
+    homeTab = el.dataset.tab;
+    try { localStorage.setItem(HOME_TAB, homeTab); } catch { /* stockage indisponible : l'onglet ne sera pas retenu */ }
+    viewAccounts();
   },
   'ticket-key-del'() {
     if (!confirm('Supprimer la clé Gemini de cet appareil ?')) return;
