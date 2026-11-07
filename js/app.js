@@ -71,6 +71,7 @@ const ICONS = {
   select: icon('<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12l2.5 2.5 4.5-5"/>'),
   trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 12.5h9l1-12.5"/>'),
   close: icon('<path d="M6 6l12 12M18 6L6 18"/>'),
+  chevron: icon('<path d="M6 9l6 6 6-6"/>'),
   gear: icon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
 };
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
@@ -100,6 +101,7 @@ const routes = [
   [/^#\/statistiques$/, () => viewStats(null)],
   [/^#\/statistiques\/categorie\/(\w+)$/, id => viewStats(id)],
   [/^#\/reglages$/, () => viewSettings()],
+  [/^#\/recherche$/, () => viewSearch()],
 ];
 
 function render() {
@@ -110,6 +112,7 @@ function render() {
   // Sur PC, l'accueil, la page d'un compte et les statistiques prennent toute la largeur ; le reste garde une colonne.
   view.classList.toggle('wide', /^#\/?$|^#\/compte\/\w+$|^#\/statistiques/.test(hash));
   route[1](...hash.match(route[0]).slice(1));
+  $('#search-btn').hidden = !/^#\/?$/.test(hash) || !store.idx.acc.size; // loupe de l'accueil
   renderSide();
   scrollTo(0, scrollMem.get(hash) ?? 0);
 }
@@ -132,6 +135,7 @@ $('#back').addEventListener('click', () => goBack());
 function refreshListView() {
   if (currentHash === '#/reglages') return renderDataCard();
   if (listening || $('#say')?.value) return; // phrase en cours de saisie ou de dictée sur la page d'un compte
+  if (document.activeElement?.id === 'q') return; // recherche ou filtre en cours de frappe
   if (/^#\/?$|^#\/compte\/\w+$|^#\/recurrentes$|^#\/statistiques/.test(currentHash)) {
     scrollMem.set(currentHash, scrollY);
     render();
@@ -373,16 +377,34 @@ function renderOps(id) {
   if (ui.unchk) rows = rows.filter(e => !e.chk);
   if (q) rows = rows.filter(e => matches(e, q));
   rows = rows.slice().reverse();
-  const shown = rows.slice(0, ui.limit);
   const today = store.todayStr();
   // Mode sélection : toucher une ligne la coche au lieu de l'ouvrir, le pointage est masqué.
   const sel = opSel?.acc === id ? opSel.ids : null;
+  // Mois repliés : seul leur en-tête reste, avec le nombre d'opérations et leur total.
+  const folded = (ui.folded ??= new Set());
+  const months = new Map();
+  for (const e of rows) {
+    const s = months.get(e.date.slice(0, 7)) ?? { n: 0, total: 0 };
+    s.n++; s.total += e.amt;
+    months.set(e.date.slice(0, 7), s);
+  }
+  const visible = []; // lignes affichées : les mois repliés ne comptent pas dans la page de ui.limit lignes
+  let rest = 0;
 
   let html = '';
   let month = '';
-  for (const e of shown) {
+  for (const e of rows) {
     const m = e.date.slice(0, 7);
-    if (m !== month) { month = m; html += `<h3 class="month">${monthLabel(e.date)}</h3>`; }
+    if (visible.length >= ui.limit) { if (!folded.has(m)) rest++; continue; }
+    if (m !== month) {
+      month = m;
+      const f = folded.has(m), s = months.get(m);
+      html += `<button type="button" class="month" data-action="fold" data-m="${m}" aria-expanded="${!f}">
+        <span>${monthLabel(e.date)}</span>
+        <span class="month-sum">${f ? `${plural(s.n, 'opération', 'opérations')} · ${signed(s.total)}` : ''}${ICONS.chevron}</span></button>`;
+    }
+    if (folded.has(m)) continue;
+    visible.push(e.id);
     const meta = [dayMonth(e.date), catLabel(e.cat), e.mode].filter(Boolean).map(esc).join(' · ');
     const main = `<span class="op-title">${esc(e.title || '(sans libellé)')}</span>
         <span class="op-meta">${e.date > today ? '<span class="tag">À venir</span> · ' : ''}${meta}</span>`;
@@ -401,13 +423,13 @@ function renderOps(id) {
     </div>`;
   }
   $('#ops').innerHTML = (rows.length
-    ? `<div class="list">${html}</div>${rows.length > shown.length
-      ? `<button type="button" class="btn ghost block" data-action="more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`
+    ? `<div class="list">${html}</div>${rest
+      ? `<button type="button" class="btn ghost block" data-action="more">Afficher plus (${plural(rest, 'restante', 'restantes')})</button>` : ''}`
     : `<p class="empty">${ui.unchk && !q ? '🎉 Tout est pointé !' : q ? '🔍 Aucune opération ne correspond.' : 'Aucune opération sur ce compte.'}</p>`)
     + (sel ? '<div class="sel-actions" id="sel-actions"></div>' : '');
   $('.fab.new-op').hidden = !!sel;
   if (sel) {
-    opSel.shown = shown.map(e => e.id);
+    opSel.shown = visible; // « Tout » ne coche pas les opérations des mois repliés
     renderSelBar();
   }
 }
@@ -421,6 +443,56 @@ function renderSelBar() {
     <span class="sel-count" role="status">${n.toLocaleString('fr-FR')}<span class="sel-word"> ${n > 1 ? 'sélectionnées' : 'sélectionnée'}</span></span>
     <button type="button" class="btn ghost" data-action="sel-all" ${opSel.shown.length ? '' : 'disabled'}>${all ? 'Aucune' : 'Tout'}</button>
     <button type="button" class="btn danger" data-action="sel-delete" ${n ? '' : 'disabled'}>${ICONS.trash}Supprimer</button>`;
+}
+
+// ---------- Écran : recherche dans tous les comptes (loupe de l'accueil) ----------
+const searchUi = { q: '', limit: PAGE };
+
+function viewSearch() {
+  setHeader('Rechercher', true);
+  view.innerHTML = `
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Libellé, catégorie, montant… dans tous les comptes" value="${esc(searchUi.q)}"
+        aria-label="Rechercher dans tous les comptes" enterkeyhint="search">
+    </div>
+    <div id="results"></div>`;
+  renderSearch();
+  const input = $('#q');
+  if (!searchUi.q) input.focus();
+  let t;
+  input.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => { searchUi.q = input.value; searchUi.limit = PAGE; renderSearch(); }, 150);
+  });
+}
+
+function renderSearch() {
+  const q = norm(searchUi.q.trim());
+  const out = $('#results');
+  if (!q) {
+    out.innerHTML = '<p class="empty">🔍 Un libellé, une catégorie, un mode de paiement ou un montant : la recherche porte sur tous vos comptes.</p>';
+    return;
+  }
+  const rows = [...store.idx.entry.values()]
+    .filter(e => !e.init && store.idx.acc.has(e.acc) && matches(e, q))
+    .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+  if (!rows.length) { out.innerHTML = '<p class="empty">🔍 Aucune opération ne correspond.</p>'; return; }
+  const total = rows.reduce((s, e) => s + e.amt, 0);
+  const shown = rows.slice(0, searchUi.limit);
+  let html = '', month = '';
+  for (const e of shown) {
+    if (e.date.slice(0, 7) !== month) { month = e.date.slice(0, 7); html += `<h3 class="month">${monthLabel(e.date)}</h3>`; }
+    const a = store.idx.acc.get(e.acc);
+    const meta = [dayMonth(e.date), a.name, catLabel(e.cat)].filter(Boolean).map(esc).join(' · ');
+    html += `<a class="op found" href="#/operation/${e.id}">
+      ${bankLogo(a, 32)}
+      <span class="op-main"><span class="op-title">${esc(e.title || '(sans libellé)')}</span><span class="op-meta">${meta}</span></span>
+      <span class="op-amt"><span class="amt ${e.amt > 0 ? 'pos' : ''}">${signed(e.amt)}</span>${e.chk ? '' : '<span class="sub">non pointée</span>'}</span>
+    </a>`;
+  }
+  out.innerHTML = `<p class="hint found-sum">${plural(rows.length, 'opération', 'opérations')} · total <span class="amt">${signed(total)}</span></p>
+    <div class="list">${html}</div>
+    ${rows.length > shown.length ? `<button type="button" class="btn ghost block" data-action="search-more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`;
 }
 
 // ---------- Écran : saisie / modification d'une opération ----------
@@ -1122,10 +1194,34 @@ const rhythm = o => {
   return `le ${o.day}${f === 1 ? ' de chaque mois' : f === 12 ? ', tous les ans' : `, tous les ${f} mois`}`;
 };
 
+const ordersUi = { q: '' };
+
 function viewOrders() {
   setHeader('Opérations récurrentes', true);
-  const orders = recur.activeOrders().filter(o => store.idx.acc.has(o.acc));
-  const byId = new Map(orders.map(o => [o.id, o]));
+  view.innerHTML = `
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Filtrer : libellé, compte, catégorie, montant…" value="${esc(ordersUi.q)}" aria-label="Filtrer les opérations récurrentes">
+    </div>
+    <p class="hint">Le jour de l'échéance, l'opération est ajoutée au compte. Corrigez-la ensuite si la date ou le montant réel diffère.</p>
+    <div id="orders"></div>
+    <a class="fab" href="#/nouvelle-recurrente" aria-label="Nouvelle opération récurrente">${ICON_PLUS}</a>`;
+  renderOrders();
+  let t;
+  $('#q').addEventListener('input', ev => {
+    clearTimeout(t);
+    t = setTimeout(() => { ordersUi.q = ev.target.value; renderOrders(); }, 150);
+  });
+}
+
+function renderOrders() {
+  const all = recur.activeOrders().filter(o => store.idx.acc.has(o.acc));
+  const byId = new Map(all.map(o => [o.id, o]));
+  // Filtre : comme la recherche d'un compte, plus le nom du compte (et celui de l'autre compte d'un virement).
+  const q = norm(ordersUi.q.trim());
+  const accName = id => norm(store.idx.acc.get(id)?.name);
+  const orders = q
+    ? all.filter(o => matches(o, q) || accName(o.acc).includes(q) || (o.pair && byId.has(o.pair) && accName(byId.get(o.pair).acc).includes(q)))
+    : all;
   const next = new Map(orders.map(o => [o.id, recur.nextDue(o)]));
   const thisYear = store.todayStr().slice(0, 4);
   const row = o => {
@@ -1145,11 +1241,9 @@ function viewOrders() {
     }).join('');
   const running = orders.filter(o => next.get(o.id));
   const ended = orders.filter(o => !next.get(o.id));
-  view.innerHTML = `
-    <p class="hint">Le jour de l'échéance, l'opération est ajoutée au compte. Corrigez-la ensuite si la date ou le montant réel diffère.</p>
-    ${running.length ? `<div class="list">${byAccount(running)}</div>` : '<p class="empty">Aucune opération récurrente en cours.</p>'}
-    ${ended.length ? `<details class="closed"><summary>Terminées (${ended.length})</summary><div class="list">${byAccount(ended)}</div></details>` : ''}
-    <a class="fab" href="#/nouvelle-recurrente" aria-label="Nouvelle opération récurrente">${ICON_PLUS}</a>`;
+  $('#orders').innerHTML = q && !orders.length ? '<p class="empty">🔍 Aucune opération récurrente ne correspond.</p>' : `
+    ${running.length ? `<div class="list">${byAccount(running)}</div>` : `<p class="empty">Aucune opération récurrente en cours${q ? ' ne correspond' : ''}.</p>`}
+    ${ended.length ? `<details class="closed" ${q ? 'open' : ''}><summary>Terminées (${ended.length})</summary><div class="list">${byAccount(ended)}</div></details>` : ''}`;
 }
 
 function viewOrderForm(id) {
@@ -1279,8 +1373,8 @@ async function runRecurrences() {
 
 // ---------- Écran : statistiques ----------
 const statsUi = { tab: 'cat', period: {}, acc: '', cat: '' };
-const STATS_TABS = [['cat', '🏷️ Catégories'], ['mois', '📅 Par mois'], ['one', '🔎 Une catégorie'], ['soldes', '📈 Soldes']];
-const DEFAULT_PERIOD = { cat: 'm12', mois: 'm12', one: 'm36', soldes: 'all' };
+const STATS_TABS = [['cat', '🏷️ Catégories'], ['mois', '📅 Par mois'], ['one', '🔎 Une catégorie'], ['soldes', '📈 Soldes'], ['int', '💰 Intérêts']];
+const DEFAULT_PERIOD = { cat: 'm12', mois: 'm12', one: 'm36', soldes: 'all', int: 'all' };
 const NO_CAT = 'sans'; // « sans catégorie » dans l'adresse
 const shortMonth = new Intl.DateTimeFormat('fr-FR', { month: 'short' });
 const pct = (v, total) => (total ? `${Math.round(v * 100 / total)} %` : '');
@@ -1338,7 +1432,7 @@ const tableView = (head, rows) => `<details class="viz-table"><summary>Voir le t
 // Barres classées : rows = [{ key, mag (centimes, positif), cls ('in' | 'out'), name, text, href? }].
 function rankCard(title, rows, total) {
   if (!rows.length) return '';
-  const max = rows[0].mag || 1;
+  const max = Math.max(...rows.map(r => r.mag)) || 1; // lignes pas forcément triées par montant (années)
   return `<section class="card"><h2>${esc(title)}</h2><div class="rank">${rows.map(r => {
     const tag = r.href ? 'a' : 'div';
     return `<${tag} class="rank-row"${r.href ? ` href="${r.href}"` : ''}>
@@ -1397,7 +1491,24 @@ function renderStats(tab = statsArgs[0], key = statsArgs[1]) {
   const body = $('#st-body');
   const scope = `${p.label} · ${statsUi.acc ? store.idx.acc.get(statsUi.acc).name : 'tous les comptes'}`;
   if (key != null) return statsDrill(body, key, p, accIds, scope, reps);
-  ({ cat: statsCategories, mois: statsMonths, one: statsOneCat, soldes: statsBalances })[tab](body, p, accIds, scope, reps);
+  ({ cat: statsCategories, mois: statsMonths, one: statsOneCat, soldes: statsBalances, int: statsInterests })[tab](body, p, accIds, scope, reps);
+}
+
+// Intérêts reçus : recettes de la catégorie « Intérêts » (ou d'une de ses sous-catégories), sur tous les comptes, épargne ou non.
+function statsInterests(body, p, accIds) {
+  const isInterest = e => store.idx.cat.get(e.cat)?.type === 'R' && /interet/.test(norm(catLabel(e.cat)));
+  const ents = stats.pick(accIds, p.from, p.to).filter(isInterest);
+  if (!ents.length) { body.innerHTML = '<p class="empty">Aucun intérêt reçu sur cette période.</p>'; return; }
+  const total = sum(ents.map(e => e.amt));
+  const byAcc = [...stats.sumBy(ents, e => e.acc)].sort((a, b) => b[1] - a[1]);
+  const byYear = [...stats.sumBy(ents, e => e.date.slice(0, 4))].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  const accRows = byAcc.map(([id, v]) => ({ key: id, mag: v, cls: 'in', name: store.idx.acc.get(id)?.name ?? '?', text: money(v), href: `#/compte/${id}` }));
+  const yearRows = byYear.map(([y, v]) => ({ key: y, mag: v, cls: 'in', name: y, text: money(v) }));
+  body.innerHTML = `
+    ${tiles([['Intérêts reçus', `<span class="amt pos">${money(total)}</span>`], ['Comptes concernés', String(byAcc.length)]])}
+    ${rankCard('Intérêts par compte', accRows, total)}
+    ${byYear.length > 1 ? rankCard('Intérêts par année', yearRows, total) : ''}
+    <p class="hint">Opérations de la catégorie « Intérêts » : pour qu'un versement d'intérêts soit compté, donnez-lui cette catégorie. Touchez un compte pour l'ouvrir.</p>`;
 }
 
 function statsCategories(body, p, accIds, scope, reps) {
@@ -1746,6 +1857,27 @@ const actions = {
   more() {
     acctUi[currentAccId].limit += 200;
     renderOps(currentAccId);
+  },
+  'search-more'() {
+    searchUi.limit += 200;
+    renderSearch();
+  },
+  fold(el) {
+    const { folded } = acctUi[currentAccId];
+    const m = el.dataset.m;
+    const topH = $('.top').offsetHeight;
+    const stuck = el.getBoundingClientRect().top <= topH + 1; // en-tête collé en haut : on était au milieu du mois
+    if (!folded.delete(m)) folded.add(m);
+    renderOps(currentAccId);
+    const b = $(`.month[data-m="${m}"]`);
+    b.focus({ preventScroll: true });
+    // Replié depuis le milieu du mois : on remonte à son en-tête plutôt que de se retrouver plus loin dans la liste.
+    if (stuck) {
+      b.style.position = 'static';
+      const y = b.getBoundingClientRect().top + scrollY;
+      b.style.position = '';
+      scrollTo(0, y - topH);
+    }
   },
   select() {
     opSel = opSel ? null : { acc: currentAccId, ids: new Set(), shown: [] };
