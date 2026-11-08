@@ -568,8 +568,45 @@ function catField(options) {
       </div>`;
 }
 
+// Nouvelle catégorie tapée dans le champ : « Bio » (catégorie principale) ou « Alimentation > Bio » (sous-catégorie ;
+// la catégorie principale est créée aussi si elle n'existe pas). Elle se range à la suite de sa catégorie principale.
+function catPlan(text, type) {
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  const [a, b] = text.split(/\s*[>›]\s*/).map(s => s.trim());
+  const cats = [...store.idx.cat.values()].filter(c => c.type === type);
+  if (!b || !a) return { name: cap(text.replace(/[>›]/g, '').trim()), parent: null, newParent: null };
+  // Catégorie principale : nom exact, sinon la première qui commence par ce qui est tapé (« alim » : Alimentation & Autres).
+  const tops = cats.filter(c => !c.parent).sort((x, y) => (x.pos ?? 0) - (y.pos ?? 0));
+  const parent = tops.find(c => norm(c.name) === norm(a)) ?? tops.find(c => norm(c.name).startsWith(norm(a)));
+  return { name: cap(b), parent, newParent: parent ? null : cap(a) };
+}
+
+async function createCategory(text, type) {
+  const plan = catPlan(text, type);
+  const cats = [...store.idx.cat.values()].filter(c => c.type === type);
+  const maxPos = Math.max(-1, ...cats.map(c => c.pos ?? 0));
+  const items = [];
+  let parentId = plan.parent?.id ?? null, pos = maxPos + 1;
+  if (plan.newParent) {
+    parentId = store.newId();
+    items.push(['categories', { id: parentId, name: plan.newParent, type, pos }]);
+    pos += 1;
+  } else if (parentId) {
+    // Juste après la dernière sous-catégorie du parent, avant la catégorie suivante.
+    const last = Math.max(plan.parent.pos ?? 0, ...cats.filter(c => c.parent === parentId).map(c => c.pos ?? 0));
+    const next = Math.min(maxPos + 1, ...cats.map(c => c.pos ?? 0).filter(p => p > last));
+    pos = (last + next) / 2;
+  }
+  const id = store.newId();
+  items.push(['categories', { id, name: plan.name, type, pos, ...(parentId ? { parent: parentId } : {}) }]);
+  await store.upsertMany(items);
+  toast(`🏷️ Catégorie « ${catLabel(id)} » créée`);
+  return id;
+}
+
 const coarsePointer = matchMedia('(pointer: coarse)');
-function wireCatField(sel) {
+// getType (facultatif) : type de l'opération en cours ('D' ou 'R') ; il permet de créer une catégorie depuis le champ.
+function wireCatField(sel, getType) {
   const input = $('#f-cat'), list = $('#cat-list');
   let items = [], active = -1;
   const show = () => { input.value = sel.value ? sel.selectedOptions[0]?.text ?? '' : ''; };
@@ -581,10 +618,20 @@ function wireCatField(sel) {
     // Les catégories dont un mot commence par ce qui est tapé d'abord (« tel » : Téléphonie avant Hotels).
     const rank = o => (words.every(w => norm(o.text).split(/[^a-z0-9]+/).some(p => p.startsWith(w))) ? 0 : 1);
     items = [...sel.options].filter(o => words.every(w => norm(o.text).includes(w))).sort((a, b) => rank(a) - rank(b));
+    // Rien d'identique à ce qui est tapé : on propose de créer la catégorie, en dernier.
+    const typed = q.trim(), type = getType?.();
+    const same = o => norm(o.text) === norm(typed) || norm(o.text.split(' › ').pop()) === norm(typed);
+    if (type && typed && !items.some(same)) {
+      const p = catPlan(typed, type);
+      items.push({ create: typed, label: `${p.parent?.name ?? p.newParent ?? ''}${p.parent || p.newParent ? ' › ' : ''}${p.name}` });
+    }
     active = words.length ? 0 : items.findIndex(o => o.value === sel.value);
     list.innerHTML = items.length
-      ? items.map((o, i) => `<button type="button" role="option" id="cat-o${i}" data-i="${i}" tabindex="-1"
-          aria-selected="${o.value === sel.value}">${esc(o.text)}</button>`).join('')
+      ? items.map((o, i) => (o.create
+        ? `<button type="button" role="option" id="cat-o${i}" data-i="${i}" tabindex="-1" class="cat-new">
+            <span>＋ Créer « ${esc(o.label)} »</span><small>${type === 'R' ? 'recette' : 'dépense'}</small></button>`
+        : `<button type="button" role="option" id="cat-o${i}" data-i="${i}" tabindex="-1"
+          aria-selected="${o.value === sel.value}">${esc(o.text)}</button>`)).join('')
       : '<p class="cat-none">Aucune catégorie ne correspond.</p>';
     list.hidden = false;
     input.setAttribute('aria-expanded', 'true');
@@ -609,8 +656,12 @@ function wireCatField(sel) {
     if (!input.value.trim()) sel.value = ''; // champ vidé : sans catégorie
     show(); // texte tapé sans choisir : on revient à la catégorie en place
   }
-  function pick(o) {
-    sel.value = o.value;
+  async function pick(o) {
+    if (o.create) {
+      const id = await createCategory(o.create, getType());
+      sel.innerHTML = catOptions(getType(), id);
+      sel.value = id;
+    } else sel.value = o.value;
     close();
     if (coarsePointer.matches) input.blur(); // referme le clavier du téléphone
   }
@@ -794,7 +845,7 @@ function viewEntryForm(id, accId) {
   f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
     F.cat.innerHTML = catOptions(currentType(), F.cat.value);
   }));
-  wireCatField(F.cat);
+  wireCatField(F.cat, currentType);
   F.pair.addEventListener('change', () => {
     if (F.pair.value && [...F.mode.options].some(o => o.value === 'Virement')) F.mode.value = 'Virement';
   });
@@ -1325,7 +1376,7 @@ function viewOrderForm(id) {
   f.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
     F.cat.innerHTML = catOptions(currentType(), F.cat.value);
   }));
-  wireCatField(F.cat);
+  wireCatField(F.cat, currentType);
 
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
@@ -1449,9 +1500,14 @@ const bucketCats = bks => bks.map(b => (b.key.length === 4
 const tiles = list => `<div class="tiles">${list.map(([label, html]) => `
   <div class="tile"><span class="label">${esc(label)}</span><span class="val">${html}</span></div>`).join('')}</div>`;
 
-const tableView = (head, rows) => `<details class="viz-table"><summary>Voir le tableau</summary><table>
-  <thead><tr>${head.map(h => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead>
-  <tbody>${rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></details>`;
+// Tableau dépliable. Les colonnes de montants perdent leur « € », rappelé dans l'en-tête : plus étroit sur un téléphone.
+const tableView = (head, rows) => {
+  const euro = head.map((_, j) => rows.length > 0 && rows.every(r => /\s€$/.test(r[j])));
+  const cell = (c, j) => (euro[j] ? String(c).replace(/\s€$/, '') : c);
+  return `<details class="viz-table"><summary>Voir le tableau</summary><div class="table-wrap"><table>
+  <thead><tr>${head.map((h, j) => `<th scope="col">${esc(h)}${euro[j] ? ' (€)' : ''}</th>`).join('')}</tr></thead>
+  <tbody>${rows.map(r => `<tr>${r.map((c, j) => `<td>${esc(cell(c, j))}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+};
 
 // Barres classées : rows = [{ key, mag (centimes, positif), cls ('in' | 'out'), name, text, href? }].
 function rankCard(title, rows, total) {
