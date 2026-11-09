@@ -141,6 +141,13 @@ async function ask(file, text, schema, maxSide) {
   return parse(response);
 }
 
+// Requête libre (assistant) : renvoie la réponse brute de Gemini, avec les mêmes relances que la lecture des tickets.
+export async function generate(body) {
+  const key = getKey();
+  if (!key) throw new Error('Ajoutez votre clé Gemini dans les Réglages.');
+  return call(body, key);
+}
+
 // Lit un ticket et renvoie les champs du schéma. context : { today, titles, categories, modes } (listes de textes).
 export const readTicket = (file, context) => ask(file, prompt(context), SCHEMA, 1600);
 

@@ -5,6 +5,7 @@ import { convertBackup, parseBackupText } from './import.js';
 import * as recur from './recur.js';
 import * as stats from './stats.js';
 import * as ticket from './ticket.js';
+import * as assistant from './assistant.js';
 import { bankLogo } from './banks.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -72,6 +73,8 @@ const ICONS = {
   trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 12.5h9l1-12.5"/>'),
   close: icon('<path d="M6 6l12 12M18 6L6 18"/>'),
   chevron: icon('<path d="M6 9l6 6 6-6"/>'),
+  // Étoile à quatre branches, dans l'esprit de Gemini (pleine, pas au trait).
+  gemini: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2Q13 11 22 12Q13 13 12 22Q11 13 2 12Q11 11 12 2Z"/></svg>',
   gear: icon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
 };
 const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé pour les saisies rapides
@@ -102,6 +105,7 @@ const routes = [
   [/^#\/statistiques\/categorie\/(\w+)$/, id => viewStats(id)],
   [/^#\/reglages$/, () => viewSettings()],
   [/^#\/recherche$/, () => viewSearch()],
+  [/^#\/assistant$/, () => viewAssistant()],
 ];
 
 function render() {
@@ -111,6 +115,7 @@ function render() {
   document.body.classList.remove('picking', 'selecting'); // choix de catégorie, sélection d'opérations : laissés en quittant l'écran
   // Sur PC, l'accueil, la page d'un compte et les statistiques prennent toute la largeur ; le reste garde une colonne.
   view.classList.toggle('wide', /^#\/?$|^#\/compte\/\w+$|^#\/statistiques/.test(hash));
+  view.classList.toggle('chat-page', hash === '#/assistant'); // conversation : champ de saisie collé en bas
   route[1](...hash.match(route[0]).slice(1));
   $('#search-btn').hidden = !/^#\/?$/.test(hash) || !store.idx.acc.size; // loupe de l'accueil
   renderTabbar(hash);
@@ -204,6 +209,7 @@ function renderTabbar(hash) {
     ${link('#/', ICONS.home, 'Accueil', /^#\/?$/)}
     ${link('#/statistiques', ICONS.chart, 'Stats', /^#\/statistiques/)}
     <a class="tab-plus" href="${plus[0]}" aria-label="${plus[1]}" title="${plus[1]}"><i>${ICON_PLUS}</i></a>
+    <a class="tab-plus tab-gem" href="#/assistant" aria-label="Assistant Gemini" title="Assistant Gemini"><i>${ICONS.gemini}</i></a>
     ${link('#/recurrentes', ICONS.repeat, 'Récurrentes', /^#\/recurrentes/)}
     ${link('#/reglages', ICONS.gear, 'Réglages', /^#\/reglages/)}`;
 }
@@ -231,6 +237,7 @@ function renderSide() {
       ${nav('#/', ICONS.home, 'Accueil', /^#\/?$/)}
       ${nav('#/recurrentes', ICONS.repeat, 'Récurrentes', /^#\/(nouvelle-)?recurrente/)}
       ${nav('#/statistiques', ICONS.chart, 'Statistiques', /^#\/statistiques/)}
+      ${nav('#/assistant', ICONS.gemini, 'Assistant', /^#\/assistant/)}
       ${nav('#/reglages', ICONS.gear, 'Réglages', /^#\/reglages/)}
     </nav>
     ${group('Comptes courants', current)}
@@ -517,6 +524,109 @@ function renderSearch() {
   out.innerHTML = `<p class="hint found-sum">${plural(rows.length, 'opération', 'opérations')} · total <span class="amt">${signed(total)}</span></p>
     <div class="list">${html}</div>
     ${rows.length > shown.length ? `<button type="button" class="btn ghost block" data-action="search-more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`;
+}
+
+// ---------- Écran : assistant (conversation avec Gemini sur les comptes, en lecture seule) ----------
+// La conversation reste en mémoire le temps de la session (rien sur le Drive) ; « Nouvelle conversation » la vide.
+const chat = { history: [], msgs: [], busy: false, step: '' };
+const SUGGESTIONS = [
+  'Combien ai-je dépensé ce mois-ci, et dans quelles catégories ?',
+  'Quels abonnements je paie, et combien par mois ?',
+  'Mes 10 plus grosses dépenses du mois dernier',
+  'Est-ce que je finis le mois dans le vert ?',
+];
+
+// Markdown simple des réponses de Gemini : paragraphes, gras, italique, listes, titres, tableaux (qui défilent seuls).
+function md(src) {
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\w)/g, '$1<i>$2</i>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  const table = rows => {
+    const cells = r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+    const body = rows.filter(r => !/^\|?\s*:?-{2,}/.test(r)).map(cells);
+    const num = c => /^[-+−]?\s?[\d\s  .,]+\s?€?$/.test(c);
+    const [head, ...rest] = body;
+    return `<div class="table-wrap"><table class="md-table"><thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join('')}</tr></thead>
+      <tbody>${rest.map(r => `<tr>${r.map(c => `<td${num(c) ? ' class="num"' : ''}>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  };
+  let html = '', list = null, rows = null;
+  const flush = () => {
+    if (list) { html += `</${list}>`; list = null; }
+    if (rows) { html += table(rows); rows = null; }
+  };
+  for (const line of String(src).replace(/\r/g, '').split('\n')) {
+    const t = line.trim();
+    let m;
+    if (/^\|.*\|$/.test(t)) { if (list) flush(); (rows ??= []).push(t); continue; }
+    if ((m = t.match(/^[-*•]\s+(.*)$/))) { if (list !== 'ul') { flush(); html += '<ul>'; list = 'ul'; } html += `<li>${inline(m[1])}</li>`; continue; }
+    if ((m = t.match(/^\d+[.)]\s+(.*)$/))) { if (list !== 'ol') { flush(); html += '<ol>'; list = 'ol'; } html += `<li>${inline(m[1])}</li>`; continue; }
+    flush();
+    if (!t) continue;
+    html += (m = t.match(/^#{1,6}\s+(.*)$/)) ? `<p><b>${inline(m[1])}</b></p>` : `<p>${inline(t)}</p>`;
+  }
+  flush();
+  return html;
+}
+
+function viewAssistant() {
+  setHeader('Assistant', true);
+  view.innerHTML = `
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <form class="composer" id="composer" autocomplete="off">
+      <textarea id="ask" rows="1" placeholder="Une question sur vos comptes…" enterkeyhint="send" aria-label="Question pour l'assistant"></textarea>
+      ${Speech ? `<button type="button" class="ai-btn ai-mic" id="ask-mic" aria-label="Dicter la question" aria-pressed="false">${ICONS.mic}</button>` : ''}
+      <button type="submit" class="ai-btn ask-go" aria-label="Envoyer">${ICONS.send}</button>
+    </form>`;
+  renderChat();
+  const form = $('#composer'), ta = $('#ask');
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`; };
+  const send = q => { ta.value = ''; grow(); askAssistant(q); };
+  ta.addEventListener('input', grow);
+  ta.addEventListener('keydown', ev => { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); form.requestSubmit(); } });
+  form.addEventListener('submit', ev => {
+    ev.preventDefault();
+    const q = ta.value.trim();
+    if (q) send(q); else ta.focus();
+  });
+  const mic = $('#ask-mic');
+  mic?.addEventListener('click', () => dictate(mic, text => { ta.value = text; grow(); }, send));
+}
+
+function renderChat() {
+  const box = $('#chat');
+  if (!box) return; // réponse arrivée après avoir quitté l'écran : elle s'affichera au retour
+  box.innerHTML = !chat.msgs.length
+    ? `<div class="chat-hello">
+        <i class="gem-badge">${ICONS.gemini}</i>
+        <h2>Une question sur vos comptes ?</h2>
+        <p class="hint">Gemini consulte vos soldes, vos opérations et vos récurrentes sur cet appareil, sans rien pouvoir modifier.
+          ${ticket.getKey() ? '' : '<br><a href="#/reglages">Ajoutez d\'abord votre clé Gemini dans les Réglages.</a>'}</p>
+        <div class="chat-sugg">${SUGGESTIONS.map(s => `<button type="button" class="chip" data-action="chat-suggest">${esc(s)}</button>`).join('')}</div>
+      </div>`
+    : chat.msgs.map(m => (m.role === 'user' ? `<div class="msg me">${esc(m.text)}</div>`
+      : m.role === 'error' ? `<div class="msg err">${esc(m.text)}</div>` : `<div class="msg ai">${md(m.text)}</div>`)).join('')
+      + (chat.busy ? `<div class="msg ai typing"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-step">${esc(chat.step || 'Gemini réfléchit…')}</span></div>`
+        : `<button type="button" class="chip new-chat" data-action="chat-reset">${ICONS.repeat}Nouvelle conversation</button>`);
+  requestAnimationFrame(() => scrollTo(0, document.documentElement.scrollHeight));
+}
+
+async function askAssistant(q) {
+  if (chat.busy || !keyOrSettings()) return;
+  chat.msgs.push({ role: 'user', text: q });
+  chat.busy = true;
+  chat.step = '';
+  renderChat();
+  try {
+    const answer = await assistant.ask(chat.history, q, step => {
+      chat.step = step;
+      const el = $('#chat-step');
+      if (el) el.textContent = step;
+    });
+    chat.msgs.push({ role: 'ai', text: answer });
+  } catch (err) {
+    chat.msgs.push({ role: 'error', text: err.message });
+  }
+  chat.busy = false;
+  renderChat();
 }
 
 // ---------- Écran : saisie / modification d'une opération ----------
@@ -1938,6 +2048,15 @@ const actions = {
     acctUi[currentAccId].limit += 200;
     renderOps(currentAccId);
   },
+  'chat-suggest'(el) {
+    askAssistant(el.textContent.trim());
+  },
+  'chat-reset'() {
+    chat.history = [];
+    chat.msgs = [];
+    renderChat();
+    $('#ask')?.focus();
+  },
   'search-more'() {
     searchUi.limit += 200;
     renderSearch();
@@ -2064,6 +2183,7 @@ $('#sync').addEventListener('click', () => {
 
 // ---------- Démarrage ----------
 async function start() {
+  assistant.init({ catLabel, accKind, monthEnd });
   try {
     await store.load();
   } catch {
