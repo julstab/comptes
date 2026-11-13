@@ -81,6 +81,7 @@ const LAST_ACC = 'comptes.lastAcc'; // compte de la dernière saisie, proposé p
 let pendingPhoto = null; // photo reçue par « Partager », lue dès l'ouverture du formulaire
 let autoPhoto = false;   // 📷 d'un compte (true) : ouvre l'appareil photo dès l'ouverture du formulaire ; 🖼️ d'un compte ('pick') : le choix d'une image
 let pendingSentence = null; // phrase saisie sur la page d'un compte, lue dès l'ouverture du formulaire
+let pendingDraft = null; // opération préparée par l'assistant (« Modifier ») : remplit le formulaire à l'ouverture
 let pendingStatement = null; // captures de l'appli de la banque choisies pour le pointage : { acc, files }
 let opSel = null; // sélection de plusieurs opérations d'un compte : { acc, ids (Set), shown (identifiants affichés) }, oubliée en changeant d'écran
 
@@ -526,15 +527,101 @@ function renderSearch() {
     ${rows.length > shown.length ? `<button type="button" class="btn ghost block" data-action="search-more">Afficher plus (${plural(rows.length - shown.length, 'restante', 'restantes')})</button>` : ''}`;
 }
 
-// ---------- Écran : assistant (conversation avec Gemini sur les comptes, en lecture seule) ----------
+// ---------- Écran : assistant (conversation avec Gemini sur les comptes) ----------
+// Il consulte, et prépare des opérations affichées en fiches que l'utilisateur enregistre lui-même.
 // La conversation reste en mémoire le temps de la session (rien sur le Drive) ; « Nouvelle conversation » la vide.
-const chat = { history: [], msgs: [], busy: false, step: '' };
+// notes : ce que Gemini doit savoir à la question suivante (fiche enregistrée).
+const chat = { history: [], msgs: [], busy: false, step: '', notes: [] };
 const SUGGESTIONS = [
   'Combien ai-je dépensé ce mois-ci, et dans quelles catégories ?',
   'Quels abonnements je paie, et combien par mois ?',
   'Mes 10 plus grosses dépenses du mois dernier',
   'Est-ce que je finis le mois dans le vert ?',
+  "J'ai payé 12 € de pain hier avec la carte",
 ];
+
+// Opération demandée à l'assistant, préparée comme une saisie par phrase : libellé habituel reconnu, puis catégorie,
+// mode et compte repris de sa dernière opération ; ce qui est dit l'emporte. Rien n'est enregistré ici.
+function prepareDraft(a) {
+  const notes = [];
+  const said = String(a.libelle ?? '').trim();
+  const cents = Math.round(Math.abs(Number(a.montant) || 0) * 100);
+  if (!said) throw new Error('Libellé manquant.');
+  if (!(cents > 0)) throw new Error('Montant manquant ou nul.');
+  const q = norm(said);
+  const known = getTitleIndex().find(t => t.key === q) ?? getTitleIndex().find(t => t.key.includes(q));
+  const type = a.sens === 'recette' ? 'R' : a.sens === 'depense' ? 'D' : known && known.last.amt > 0 ? 'R' : 'D';
+  // Compte : nom exact, sinon contenu dans le nom ou la banque ; à plusieurs, le seul compte courant l'emporte.
+  const open = [...store.idx.acc.values()].filter(x => !x.closed).sort((x, y) => x.pos - y.pos);
+  const findAcc = name => {
+    const n = norm(name);
+    let hits = open.filter(x => norm(x.name) === n);
+    if (!hits.length) hits = open.filter(x => norm(x.name).includes(n) || norm(x.bank).includes(n));
+    if (hits.length > 1 && hits.filter(x => accKind(x) === 'courant').length === 1) hits = hits.filter(x => accKind(x) === 'courant');
+    if (hits.length === 1) return hits[0].id;
+    throw new Error(hits.length ? `Plusieurs comptes correspondent à « ${name} » : ${hits.map(x => x.name).join(', ')}.`
+      : `Aucun compte ne correspond à « ${name} ». Comptes : ${open.map(x => x.name).join(', ')}.`);
+  };
+  const usable = id => (id && store.idx.acc.has(id) && !store.idx.acc.get(id).closed ? id : null);
+  const acc = a.compte ? findAcc(a.compte) : usable(known?.last.acc) ?? defaultAccId();
+  const pair = a.virement_vers ? findAcc(a.virement_vers) : '';
+  if (pair === acc) throw new Error('Le virement doit aller vers un autre compte.');
+  // Catégorie : celle qui est dite (dans le bon sens si elle existe des deux), sinon celle de la dernière fois.
+  let cat = '';
+  if (a.categorie) {
+    const n = norm(a.categorie);
+    const all = [...store.idx.cat.values()];
+    const hits = all.filter(c => norm(catLabel(c.id)) === n || norm(c.name) === n);
+    const loose = hits.length ? hits : all.filter(c => norm(catLabel(c.id)).includes(n));
+    cat = (loose.find(c => c.type === type) ?? loose[0])?.id ?? '';
+    if (!cat) notes.push(`Catégorie « ${a.categorie} » introuvable : laissée vide.`);
+  } else if (known?.last.cat) cat = known.last.cat;
+  if (cat && store.idx.cat.get(cat)?.type !== type) cat = twinCat(cat);
+  const modes = store.data?.modes ?? store.DEFAULT_MODES;
+  const mode = (a.mode && modes.find(m => norm(m) === norm(a.mode) || norm(m).startsWith(norm(a.mode))))
+    || (pair && modes.includes('Virement') ? 'Virement' : '') || known?.last.mode || '';
+  let date = /^\d{4}-\d{2}-\d{2}$/.test(a.date ?? '') ? a.date : store.todayStr();
+  if (Math.abs((Date.now() - new Date(`${date}T12:00`)) / 864e5) > 400) {
+    notes.push(`Date ${a.date} trop éloignée : remplacée par aujourd'hui.`);
+    date = store.todayStr();
+  }
+  const title = (known ? known.title : said.charAt(0).toUpperCase() + said.slice(1)).slice(0, 120);
+  return { draft: { title, amt: (type === 'R' ? 1 : -1) * cents, date, acc, cat, mode, pair, state: 'new' }, notes };
+}
+
+// Enregistre une fiche de l'assistant, comme le formulaire le ferait (avec l'opération inverse d'un virement).
+async function saveDraft(d) {
+  const rec = { id: store.newId(), acc: d.acc, date: d.date, amt: d.amt, title: d.title };
+  if (d.cat) rec.cat = d.cat;
+  if (d.mode) rec.mode = d.mode;
+  const items = [['entries', rec]];
+  if (d.pair) {
+    const q = { id: store.newId(), acc: d.pair, date: d.date, amt: -d.amt, title: d.title, pair: rec.id };
+    const c = twinCat(d.cat);
+    if (c) q.cat = c;
+    if (d.mode) q.mode = d.mode;
+    rec.pair = q.id;
+    items.push(['entries', q]);
+  }
+  await store.upsertMany(items);
+  try { localStorage.setItem(LAST_ACC, d.acc); } catch { /* stockage indisponible : sans importance */ }
+}
+
+// Fiche d'une opération préparée : à enregistrer, à reprendre dans le formulaire, ou déjà enregistrée.
+function draftCard(d, mi, di) {
+  const a = store.idx.acc.get(d.acc), p = d.pair && store.idx.acc.get(d.pair);
+  const twins = d.state === 'saved' ? [] : [...lookalikes(d.acc, d.amt, d.date), ...(d.pair ? lookalikes(d.pair, -d.amt, d.date) : [])];
+  const meta = [fullDate(d.date), a?.name, p && `virement vers ${p.name}`, catLabel(d.cat), d.mode].filter(Boolean).map(esc).join(' · ');
+  const btn = (action, cls, label) => `<button type="button" class="btn ${cls}" data-action="${action}" data-m="${mi}" data-d="${di}">${label}</button>`;
+  return `<div class="draft ${d.state}">
+    <div class="draft-head">${a ? bankLogo(a, 30) : ''}<span class="draft-title">${esc(d.title)}</span>
+      <span class="amt ${d.amt > 0 ? 'pos' : ''}">${signed(d.amt)}</span></div>
+    <div class="draft-meta">${meta}</div>
+    ${twins.length ? `<div class="draft-warn">⚠️ Ressemble à : ${esc(twins.slice(0, 2).map(x => `${dayMonth(x.date)} · ${x.title || '(sans libellé)'} · ${signed(x.amt)}`).join(' ; '))}</div>` : ''}
+    ${d.state === 'saved' ? '<div class="draft-done">✅ Enregistrée</div>'
+      : `<div class="draft-actions">${btn('draft-save', 'primary', 'Enregistrer')}${btn('draft-edit', 'ghost', 'Modifier')}</div>`}
+  </div>`;
+}
 
 // Markdown simple des réponses de Gemini : paragraphes, gras, italique, listes, titres, tableaux (qui défilent seuls).
 function md(src) {
@@ -598,12 +685,14 @@ function renderChat() {
     ? `<div class="chat-hello">
         <i class="gem-badge">${ICONS.gemini}</i>
         <h2>Une question sur vos comptes ?</h2>
-        <p class="hint">Gemini consulte vos soldes, vos opérations et vos récurrentes sur cet appareil, sans rien pouvoir modifier.
+        <p class="hint">Gemini consulte vos soldes, vos opérations et vos récurrentes sur cet appareil. Il peut aussi préparer
+          des opérations à ajouter : vous les enregistrez vous-même.
           ${ticket.getKey() ? '' : '<br><a href="#/reglages">Ajoutez d\'abord votre clé Gemini dans les Réglages.</a>'}</p>
         <div class="chat-sugg">${SUGGESTIONS.map(s => `<button type="button" class="chip" data-action="chat-suggest">${esc(s)}</button>`).join('')}</div>
       </div>`
     : chat.msgs.map(m => (m.role === 'user' ? `<div class="msg me">${esc(m.text)}</div>`
-      : m.role === 'error' ? `<div class="msg err">${esc(m.text)}</div>` : `<div class="msg ai">${md(m.text)}</div>`)).join('')
+      : m.role === 'error' ? `<div class="msg err">${esc(m.text)}</div>`
+        : `<div class="msg ai">${md(m.text)}</div>${(m.drafts ?? []).map((d, di) => draftCard(d, chat.msgs.indexOf(m), di)).join('')}`)).join('')
       + (chat.busy ? `<div class="msg ai typing"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-step">${esc(chat.step || 'Gemini réfléchit…')}</span></div>`
         : `<button type="button" class="chip new-chat" data-action="chat-reset">${ICONS.repeat}Nouvelle conversation</button>`);
   requestAnimationFrame(() => scrollTo(0, document.documentElement.scrollHeight));
@@ -616,12 +705,14 @@ async function askAssistant(q) {
   chat.step = '';
   renderChat();
   try {
-    const answer = await assistant.ask(chat.history, q, step => {
+    // Ce qui s'est passé depuis la dernière réponse (fiche enregistrée) précède la question, pour que Gemini le sache.
+    const notes = chat.notes.splice(0);
+    const { text, drafts } = await assistant.ask(chat.history, notes.length ? `${notes.join('\n')}\n\n${q}` : q, step => {
       chat.step = step;
       const el = $('#chat-step');
       if (el) el.textContent = step;
     });
-    chat.msgs.push({ role: 'ai', text: answer });
+    chat.msgs.push({ role: 'ai', text, drafts });
   } catch (err) {
     chat.msgs.push({ role: 'error', text: err.message });
   }
@@ -1125,6 +1216,19 @@ function viewEntryForm(id, accId) {
     return missing.length ? `Rempli d'après la phrase, sauf ${missing.join(' et ')} : complétez, puis Enregistrer.`
       : fromLast ? "Rempli d'après la phrase, avec le montant de la dernière fois : vérifiez, puis Enregistrer."
         : "Rempli d'après la phrase : vérifiez, puis Enregistrer.";
+  }
+  if (pendingDraft && !e) { // « Modifier » sur une fiche de l'assistant : le formulaire reprend l'opération préparée
+    const d = pendingDraft;
+    pendingDraft = null;
+    const ty = d.amt > 0 ? 'R' : 'D';
+    f.querySelector(`input[name=type][value=${ty}]`).checked = true;
+    F.title.value = d.title;
+    F.amt.value = amountInput(d.amt);
+    F.date.value = d.date;
+    F.cat.innerHTML = catOptions(ty, d.cat, true);
+    F.mode.innerHTML = modeOptions(d.mode ?? '');
+    F.acc.value = d.acc;
+    F.pair.value = d.pair || '';
   }
   if (say) {
     const { sync } = wireAiBar(() => readSentence());
@@ -2051,7 +2155,24 @@ const actions = {
   'chat-suggest'(el) {
     askAssistant(el.textContent.trim());
   },
+  async 'draft-save'(el) {
+    const d = chat.msgs[+el.dataset.m]?.drafts?.[+el.dataset.d];
+    if (!d || d.state === 'saved') return;
+    el.disabled = true;
+    await saveDraft(d);
+    d.state = 'saved';
+    chat.notes.push(`(Info de l'appli : l'utilisateur a enregistré « ${d.title} », ${signed(d.amt)}, le ${fullDate(d.date)}, sur ${store.idx.acc.get(d.acc)?.name}.)`);
+    toast('✅ Opération ajoutée');
+    renderChat();
+  },
+  'draft-edit'(el) {
+    const d = chat.msgs[+el.dataset.m]?.drafts?.[+el.dataset.d];
+    if (!d) return;
+    pendingDraft = d;
+    location.hash = `#/nouvelle-operation/${d.acc}`;
+  },
   'chat-reset'() {
+    chat.notes = [];
     chat.history = [];
     chat.msgs = [];
     renderChat();
@@ -2183,7 +2304,7 @@ $('#sync').addEventListener('click', () => {
 
 // ---------- Démarrage ----------
 async function start() {
-  assistant.init({ catLabel, accKind, monthEnd });
+  assistant.init({ catLabel, accKind, monthEnd, prepareDraft });
   try {
     await store.load();
   } catch {

@@ -173,6 +173,20 @@ main.chat-page { display: flex; flex-direction: column; min-height: calc(100dvh 
 @keyframes dot { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: .6; } }
 .new-chat { align-self: center; margin-top: 6px; }
+/* Fiche d'une opération préparée par l'assistant, à enregistrer ou à reprendre dans le formulaire. */
+.draft {
+  align-self: flex-start; width: 100%; max-width: 92%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px 14px; border-radius: 16px;
+  background: var(--surface); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.draft-head { display: flex; align-items: center; gap: 10px; }
+.draft-title { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.draft-head .amt { font-weight: 700; }
+.draft-meta { font-size: 13px; color: var(--muted); }
+.draft-warn { font-size: 13px; color: var(--warn); }
+.draft-actions { display: flex; gap: 8px; margin-top: 4px; }
+.draft-actions .btn { flex: 1; min-height: 42px; }
+.draft-done { font-size: 14px; font-weight: 500; color: var(--pos); }
+.draft.saved { border-color: var(--border); }
 .chat-hello { margin: auto 0; display: grid; justify-items: center; gap: 8px; padding: 24px 4px; text-align: center; }
 .chat-hello h2 { margin: 6px 0 0; }
 .gem-badge { display: grid; place-items: center; width: 60px; height: 60px; border-radius: 20px; background: var(--gem); color: #fff; }

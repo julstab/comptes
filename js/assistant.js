@@ -1,4 +1,5 @@
-// Assistant : conversation avec Gemini sur les comptes, en lecture seule.
+// Assistant : conversation avec Gemini sur les comptes. Il consulte, et prépare des opérations que l'utilisateur
+// confirme lui-même ; il ne modifie ni ne supprime rien.
 // Gemini ne reçoit pas les données d'avance : il appelle les fonctions ci-dessous, exécutées ici sur les données de
 // l'appareil, et ne reçoit que leurs résultats. Les montants sont donc calculés par l'appli, pas par Gemini.
 import * as store from './store.js';
@@ -9,8 +10,9 @@ import { generate } from './ticket.js';
 // Gemini 4 Hydrogen : nouvelle génération, offre gratuite, meilleur raisonnement que Flash-Lite (gardé pour les tickets).
 const MODEL = 'gemini-4-hydrogen';
 
-let h = null; // fonctions de l'appli : catLabel, accKind, monthEnd
+let h = null; // fonctions de l'appli : catLabel, accKind, monthEnd, prepareDraft
 export const init = helpers => { h = helpers; };
+let drafts = []; // opérations préparées pendant la question en cours, affichées en fiches à confirmer
 
 const norm = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const eur = c => Math.round(c) / 100; // centimes → euros
@@ -193,6 +195,38 @@ const TOOLS = {
     },
   },
 
+  preparer_operation: {
+    description: "Prépare une opération à ajouter (une par appel ; un virement entre deux comptes compte pour une). Rien n'est enregistré : l'appli affiche une fiche que l'utilisateur confirme avec « Enregistrer ». Ce qui n'est pas dit (catégorie, mode, compte) est repris de la dernière opération de même libellé.",
+    parameters: {
+      type: 'object',
+      properties: {
+        libelle: { type: 'string', description: 'Libellé court, ex. « Courses Picard ».' },
+        montant: { type: 'number', description: 'Montant en euros, sans signe.' },
+        sens: { type: 'string', enum: ['depense', 'recette'] },
+        date: { type: 'string', description: "AAAA-MM-JJ, calculée à partir d'aujourd'hui pour « hier », « lundi »… ; aujourd'hui si rien n'est dit." },
+        compte: { type: 'string', description: "Compte de l'opération (nom ou partie du nom) ; pour un virement, le compte d'où part l'argent." },
+        virement_vers: { type: 'string', description: "Pour un virement entre deux comptes de l'utilisateur : le compte qui reçoit l'argent (sens = depense)." },
+        categorie: { type: 'string', description: 'Catégorie, au format « Catégorie › Sous-catégorie » si possible.' },
+        mode: { type: 'string', description: 'Moyen de paiement : Carte, Chèque, Espèces, Prélèvement, Virement…' },
+      },
+      required: ['libelle', 'montant'],
+    },
+    run(a) {
+      const { draft, notes } = h.prepareDraft(a);
+      drafts.push(draft);
+      return {
+        prete: true,
+        operation: {
+          libelle: draft.title, montant: eur(draft.amt), date: draft.date, compte: store.idx.acc.get(draft.acc)?.name,
+          virement_vers: draft.pair ? store.idx.acc.get(draft.pair)?.name : undefined,
+          categorie: h.catLabel(draft.cat) || undefined, mode: draft.mode || undefined,
+        },
+        remarques: notes.length ? notes : undefined,
+        consigne: "La fiche s'affiche sous ta réponse : l'utilisateur doit toucher « Enregistrer » (ou « Modifier »). Ne dis pas qu'elle est enregistrée.",
+      };
+    },
+  },
+
   lister_categories: {
     description: 'Liste les catégories de dépenses et de recettes, au format « Catégorie › Sous-catégorie ».',
     parameters: { type: 'object', properties: {} },
@@ -212,6 +246,7 @@ const DECLARATIONS = Object.entries(TOOLS).map(([name, t]) => ({ name, descripti
 const STEPS = {
   lister_comptes: 'Je regarde vos comptes…', chercher_operations: 'Je cherche les opérations…', totaux: 'Je calcule les totaux…',
   solde_a_date: 'Je calcule le solde…', lister_recurrentes: 'Je regarde les opérations récurrentes…', lister_categories: 'Je regarde les catégories…',
+  preparer_operation: "Je prépare l'opération…",
 };
 
 function instructions() {
@@ -223,13 +258,16 @@ function instructions() {
 - Le « solde » d'un compte est son solde pointé, celui que la banque affiche. Le solde du jour compte aussi les opérations saisies pas encore pointées ; la fin du mois prévue ajoute ce qui reste à passer ce mois-ci.
 - Les catégories ont la forme « Catégorie › Sous-catégorie » : en cas de doute sur un nom, appelle lister_categories. Les totaux par catégorie sont nets (remboursements déduits, virements entre comptes annulés).
 - Si la question est ambiguë (période, compte), prends l'hypothèse la plus naturelle, dis-la en une phrase et réponds.
-- Tu ne peux rien modifier. Si on te demande de saisir, modifier ou supprimer quelque chose, dis que l'assistant ne fait que consulter, et que cela se fait dans l'appli (bouton ＋ pour saisir, ou la page du compte).`;
+- Pour ajouter une opération, appelle preparer_operation (une fois par opération) : l'appli affiche une fiche que l'utilisateur confirme lui-même avec « Enregistrer ». Ne dis jamais qu'une opération est enregistrée : dis qu'elle est prête, à vérifier puis enregistrer. Si la fonction renvoie une erreur (compte ambigu…), pose la question à l'utilisateur.
+- Tu ne peux ni modifier ni supprimer : dis que cela se fait dans l'appli, sur la page du compte.`;
 }
 
 // Pose une question. history : la conversation au format de Gemini (complétée ici, remise en l'état en cas d'erreur).
-// onStep(texte) : étape en cours (« Je cherche les opérations… »). Renvoie la réponse de Gemini (Markdown).
+// onStep(texte) : étape en cours (« Je cherche les opérations… »).
+// Renvoie { text : la réponse de Gemini (Markdown), drafts : les opérations préparées, à faire confirmer }.
 export async function ask(history, question, onStep) {
   const start = history.length;
+  drafts = [];
   history.push({ role: 'user', parts: [{ text: question }] });
   try {
     for (let round = 0; round < 8; round++) {
@@ -247,8 +285,8 @@ export async function ask(history, question, onStep) {
       history.push({ role: 'model', ...content });
       const calls = content.parts.filter(p => p.functionCall);
       if (!calls.length) {
-        return content.parts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim()
-          || "Je n'ai pas trouvé de réponse : reformulez la question.";
+        const text = content.parts.filter(p => typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim();
+        return { text: text || (drafts.length ? 'Voici ce que je propose d\'ajouter :' : "Je n'ai pas trouvé de réponse : reformulez la question."), drafts };
       }
       const parts = calls.map(({ functionCall: fc }) => {
         onStep?.(STEPS[fc.name] ?? 'Je consulte vos comptes…');
