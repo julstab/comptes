@@ -6,6 +6,9 @@ import * as stats from './stats.js';
 import * as recur from './recur.js';
 import { generate } from './ticket.js';
 
+// Gemini 4 Hydrogen : nouvelle génération, offre gratuite, meilleur raisonnement que Flash-Lite (gardé pour les tickets).
+const MODEL = 'gemini-4-hydrogen';
+
 let h = null; // fonctions de l'appli : catLabel, accKind, monthEnd
 export const init = helpers => { h = helpers; };
 
@@ -234,7 +237,7 @@ export async function ask(history, question, onStep) {
         systemInstruction: { parts: [{ text: instructions() }] },
         contents: history,
         tools: [{ functionDeclarations: DECLARATIONS }],
-      });
+      }, MODEL);
       const content = res?.candidates?.[0]?.content;
       if (!content?.parts?.length) {
         const why = res?.candidates?.[0]?.finishReason ?? res?.promptFeedback?.blockReason;
