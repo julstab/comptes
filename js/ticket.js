@@ -67,9 +67,9 @@ const toBase64 = blob => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
-async function call(body, key, tries = TRIES) {
+async function call(body, key) {
   let last;
-  for (const [model, wait] of tries) {
+  for (const [model, wait] of TRIES) {
     if (wait) await new Promise(resolve => setTimeout(resolve, wait + Math.random() * 500));
     try {
       return await callModel(model, body, key);
@@ -141,12 +141,11 @@ async function ask(file, text, schema, maxSide) {
   return parse(response);
 }
 
-// Requête libre (assistant) : renvoie la réponse brute de Gemini. model : un autre modèle que celui des tickets ;
-// surchargé, il est réessayé une fois, puis le modèle des tickets prend le relais.
-export async function generate(body, model) {
+// Requête libre (assistant) : renvoie la réponse brute de Gemini, avec les mêmes relances que la lecture des tickets.
+export async function generate(body) {
   const key = getKey();
   if (!key) throw new Error('Ajoutez votre clé Gemini dans les Réglages.');
-  return call(body, key, model ? [[model, 0], [model, 1500], [MODEL, 0], [MODEL, 3000]] : TRIES);
+  return call(body, key);
 }
 
 // Lit un ticket et renvoie les champs du schéma. context : { today, titles, categories, modes } (listes de textes).
